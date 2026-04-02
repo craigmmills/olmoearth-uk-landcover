@@ -1,0 +1,37 @@
+[project]
+name = "olmoearth-uk-landcover"
+version = "0.1.0"
+description = "OlmoEarth-based landcover classification demo for Cambridge, UK"
+requires-python = ">=3.12"
+dependencies = [
+    "numpy",
+    "rasterio",
+    "pystac-client",
+    "planetary-computer",
+    "shapely",
+    "pyproj",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "pytest-mock"]
+all = [
+    "torch>=2.4",
+    "olmoearth-pretrain",
+    "scikit-learn",
+    "rioxarray",
+    "streamlit",
+    "folium",
+    "streamlit-folium",
+    "matplotlib",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
