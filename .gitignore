@@ -1,0 +1,10 @@
+data/
+output/
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+.streamlit/
+*.tif
+*.tiff
+.DS_Store
