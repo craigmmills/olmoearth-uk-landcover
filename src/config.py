@@ -123,3 +123,20 @@ WORLDCOVER_REMAP: dict[int, int] = {
     95: 5,   # Mangroves -> Other
     100: 5,  # Moss and lichen -> Other
 }
+
+# ---------------------------------------------------------------------------
+# OlmoEarth Embedding Extraction (Issue 2)
+# ---------------------------------------------------------------------------
+PATCH_SIZE_PX: int = 64             # Tile size for encoder input (pixels)
+ENCODER_PATCH_SIZE: int = 4         # ViT patch size within each tile
+EMBEDDING_DIM: int = 192            # OlmoEarth Tiny output embedding dimension
+OLMOEARTH_MODEL_ID: str = "OlmoEarth-v1-Tiny"
+
+# SCL (Scene Classification Layer) values to MASK OUT
+# 1=saturated, 3=cloud_shadows, 8=cloud_medium, 9=cloud_high, 10=thin_cirrus
+# NOTE: SCL=0 (no_data) is excluded because reprojection fills out-of-extent
+# pixels with 0. Those pixels may still have valid spectral data.
+SCL_MASK_VALUES: set[int] = {1, 3, 8, 9, 10}
+
+# Embedding output directory
+EMBEDDINGS_DIR: Path = OUTPUT_DIR / "embeddings"
