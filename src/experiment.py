@@ -48,6 +48,8 @@ DEFAULT_CONFIG: dict = {
         "add_ndvi": False,
         "add_ndwi": False,
         "add_spatial_context": False,
+        "spatial_context_size": 3,
+        "spatial_context_stats": ["mean"],
     },
     "post_processing": {
         "mode_filter_size": 0,
@@ -325,8 +327,42 @@ def validate_config(cfg: dict) -> None:
             "At least one of use_embeddings, add_ndvi, add_ndwi must be enabled"
         )
 
-    if add_spatial:
-        print("[experiment] WARNING: add_spatial_context is not yet implemented, ignoring")
+    # --- spatial context validation ---
+    ctx_size = features.get("spatial_context_size")
+    if not isinstance(ctx_size, int) or ctx_size < 3:
+        raise ValueError(
+            f"features.spatial_context_size must be int >= 3, got {ctx_size!r}"
+        )
+    if ctx_size % 2 == 0:
+        raise ValueError(
+            f"features.spatial_context_size must be odd, got {ctx_size}"
+        )
+    if ctx_size > 99:
+        raise ValueError(
+            f"features.spatial_context_size must be <= 99, got {ctx_size}"
+        )
+    if ctx_size > 15:
+        print(
+            f"[experiment] WARNING: spatial_context_size={ctx_size} is large, "
+            f"may be slow for 512x512 images"
+        )
+
+    VALID_STATS = {"mean", "std", "max", "min"}
+    ctx_stats = features.get("spatial_context_stats")
+    if not isinstance(ctx_stats, list) or len(ctx_stats) == 0:
+        raise ValueError(
+            f"features.spatial_context_stats must be non-empty list, got {ctx_stats!r}"
+        )
+    invalid_stats = set(ctx_stats) - VALID_STATS
+    if invalid_stats:
+        raise ValueError(
+            f"features.spatial_context_stats contains invalid values: {invalid_stats}. "
+            f"Valid options: {sorted(VALID_STATS)}"
+        )
+    if len(ctx_stats) != len(set(ctx_stats)):
+        raise ValueError(
+            f"features.spatial_context_stats contains duplicates: {ctx_stats}"
+        )
 
     # --- post_processing section ---
     mode_size = post_processing.get("mode_filter_size")

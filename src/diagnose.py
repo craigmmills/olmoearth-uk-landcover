@@ -102,6 +102,9 @@ TIER_PARAMS: dict[int, set[str]] = {
         "training.max_depth",
         "post_processing.mode_filter_size",
         "post_processing.min_mapping_unit_px",
+        "features.add_spatial_context",
+        "features.spatial_context_size",
+        "features.spatial_context_stats",
     },
     2: {
         "training.n_estimators",
@@ -121,9 +124,7 @@ TIER_PARAMS: dict[int, set[str]] = {
         "features.add_ndvi",
         "features.add_ndwi",
     },
-    3: {
-        "features.add_spatial_context",
-    },
+    3: set(),
 }
 
 
@@ -309,6 +310,11 @@ def _build_diagnosis_prompt(
         "   - features.use_embeddings: bool (at least one feature source must be true)\n"
         "   - features.add_ndvi: bool\n"
         "   - features.add_ndwi: bool\n"
+        "   - features.add_spatial_context: bool\n"
+        "   - features.spatial_context_size: odd int >= 3 and <= 99 "
+        "(only relevant when add_spatial_context is true)\n"
+        "   - features.spatial_context_stats: list of strings from "
+        "{mean, std, max, min} (only relevant when add_spatial_context is true)\n"
         "   - post_processing.mode_filter_size: 0 (disabled) or odd int >= 3, < 512\n"
         "   - post_processing.min_mapping_unit_px: int >= 0\n"
         "   - training.classifier: 'RandomForest', 'GradientBoosting', 'SVM', "
@@ -396,19 +402,18 @@ def _build_diagnosis_prompt(
 
     # Section 6: Tier constraint
     tier_desc = {
-        1: "Tier 1 (safe): training.max_samples_per_class, "
-           "training.exclude_boundary_pixels, training.boundary_buffer_px, "
-           "training.class_weight, training.max_depth, "
-           "post_processing.mode_filter_size, post_processing.min_mapping_unit_px",
+        1: "Tier 1 (safe): training.max_samples_per_class, training.exclude_boundary_pixels, "
+           "training.boundary_buffer_px, training.class_weight, training.max_depth, "
+           "post_processing.mode_filter_size, post_processing.min_mapping_unit_px, "
+           "features.add_spatial_context, features.spatial_context_size, "
+           "features.spatial_context_stats",
         2: "Tier 2 (moderate): training.classifier, training.pca_components, "
            "training.scale_features, training.l2_normalize, training.n_estimators, "
            "training.learning_rate, training.C, training.kernel, training.gamma, "
            "training.max_iter, training.n_neighbors, training.weights, "
            "training.hidden_layer_sizes, training.alpha, "
            "features.add_ndvi, features.add_ndwi",
-        3: "Tier 3 (aggressive): features.add_spatial_context "
-           "(warning: not yet implemented), "
-           "combinations of parameters from lower tiers",
+        3: "Tier 3 (aggressive): combinations of parameters from lower tiers",
     }
     sections.append(
         f"## Current Tier: {tier}\n"
@@ -728,7 +733,30 @@ def _rule_based_diagnosis(
             reasoning="Rule-based: mode_filter_size=0. Adding 5x5 mode filter.",
         )
 
-    # Rule 5 (Tier 1): Increase samples
+    # Rule 5 (Tier 1): Enable spatial context
+    if tier <= 1 and not features.get("add_spatial_context"):
+        return Hypothesis(
+            hypothesis="Spatial context (neighbor embeddings) not enabled. "
+                       "Adding neighborhood mean features reduces boundary "
+                       "misclassification and salt-and-pepper noise.",
+            component="features",
+            parameter_changes={
+                "features.add_spatial_context": True,
+                "features.spatial_context_size": 3,
+                "features.spatial_context_stats": ["mean"],
+            },
+            expected_impact="Better boundary classification, reduced noise in "
+                           "spatially coherent classes (Cropland, Grassland)",
+            risk="Doubles feature dimensionality (192 -> 384), "
+                 "slightly slower training",
+            tier=1,
+            confidence=0.75,
+            reasoning="Rule-based: spatial context not enabled. "
+                      "3x3 neighborhood mean is a low-risk feature augmentation "
+                      "that captures local structure.",
+        )
+
+    # Rule 6 (Tier 1): Increase samples
     if tier <= 1 and training.get("max_samples_per_class", 5000) < 10000:
         return Hypothesis(
             hypothesis="More training samples should improve generalization.",
@@ -742,7 +770,7 @@ def _rule_based_diagnosis(
                       f"{training.get('max_samples_per_class', 5000)}. Doubling to 10000.",
         )
 
-    # Rule 6 (Tier 2): Add NDVI
+    # Rule 7 (Tier 2): Add NDVI
     if tier <= 2 and not features.get("add_ndvi"):
         return Hypothesis(
             hypothesis=f"{worst_class} confusion may be due to missing vegetation index. "
@@ -756,7 +784,7 @@ def _rule_based_diagnosis(
             reasoning=f"Rule-based: Tier 2. NDVI not enabled, worst class={worst_class}.",
         )
 
-    # Rule 7 (Tier 2): Increase n_estimators
+    # Rule 8 (Tier 2): Increase n_estimators
     if tier <= 2 and training.get("n_estimators", 100) < 300:
         return Hypothesis(
             hypothesis=f"RandomForest with {training.get('n_estimators', 100)} trees "
@@ -770,7 +798,7 @@ def _rule_based_diagnosis(
             reasoning=f"Rule-based: Tier 2. n_estimators={training.get('n_estimators', 100)}.",
         )
 
-    # Rule 8 (Tier 2): Add NDWI
+    # Rule 9 (Tier 2): Add NDWI
     if tier <= 2 and not features.get("add_ndwi"):
         return Hypothesis(
             hypothesis="Adding NDWI for water body discrimination.",
@@ -783,7 +811,7 @@ def _rule_based_diagnosis(
             reasoning="Rule-based: NDWI not enabled.",
         )
 
-    # Rule 9 (Tier 2): Try GradientBoosting if RF hasn't improved
+    # Rule 10 (Tier 2): Try GradientBoosting if RF hasn't improved
     if tier <= 2 and training.get("classifier") == "RandomForest":
         return Hypothesis(
             hypothesis="RandomForest may not capture complex interactions in "
@@ -804,7 +832,7 @@ def _rule_based_diagnosis(
                       "RF on high-dimensional embeddings.",
         )
 
-    # Rule 10 (Tier 2): Try preprocessing (scale + PCA)
+    # Rule 11 (Tier 2): Try preprocessing (scale + PCA)
     if (tier <= 2
             and not training.get("scale_features")
             and not training.get("pca_components", 0)):

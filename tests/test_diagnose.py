@@ -494,6 +494,26 @@ class TestRuleBasedDiagnosis:
         assert h.component == "post_processing"
         assert "mode_filter_size" in str(h.parameter_changes)
 
+    def test_rule_based_diagnosis_proposes_spatial_context(self, default_config, sample_metrics):
+        """Rule-based diagnosis proposes spatial context when not enabled at Tier 1."""
+        # Ensure mode_filter is already enabled (Rule 4 satisfied)
+        # and boundary exclusion is enabled (Rule 3 satisfied)
+        # so the engine reaches Rule 5 (spatial context)
+        default_config["post_processing"]["mode_filter_size"] = 5
+        default_config["training"]["exclude_boundary_pixels"] = True
+        default_config["training"]["boundary_buffer_px"] = 2
+        default_config["features"]["add_spatial_context"] = False
+        # Skip Rule 1 (overfitting) and Rule 2 (class_weight already balanced)
+        sample_metrics["training_accuracy"] = 0.76
+        # All classes have f1 >= 0.6 to skip Rule 3
+        for cls in sample_metrics["per_class"].values():
+            cls["f1"] = max(cls["f1"], 0.65)
+            cls["recall"] = max(cls["recall"], 0.6)
+        result = _rule_based_diagnosis(sample_metrics, default_config, tier=1)
+        assert result is not None
+        assert result.parameter_changes.get("features.add_spatial_context") is True
+        assert result.tier == 1
+
     def test_tier_escalation_to_ndvi(self, sample_metrics):
         """Tier 2 with all Tier 1 options exhausted proposes NDVI."""
         cfg = copy.deepcopy(DEFAULT_CONFIG)

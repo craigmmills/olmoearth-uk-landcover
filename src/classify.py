@@ -139,6 +139,86 @@ def _augment_features(embeddings, year: str, cfg: dict):
     if result.shape[-1] != d:
         print(f"[classify] [{year}] Feature shape: ({h}, {w}, {d}) -> {result.shape}")
 
+    # Spatial context: append neighborhood statistics of the full feature vector
+    if features_cfg.get("add_spatial_context"):
+        result = _add_spatial_context(
+            result,
+            size=features_cfg.get("spatial_context_size", 3),
+            stats=features_cfg.get("spatial_context_stats", ["mean"]),
+            year=year,
+        )
+
+    return result
+
+
+def _add_spatial_context(
+    features, size: int, stats: list[str], year: str
+):
+    """Compute neighborhood statistics over feature map and concatenate.
+
+    For each channel in the input feature map, compute sliding-window
+    statistics (mean, std, max, min) and append them as new channels.
+
+    Args:
+        features: (H, W, D) float32 array -- the full augmented feature map.
+        size: sliding window size (odd int, e.g. 3 = 3x3 neighborhood).
+        stats: list of statistics to compute. Options: mean, std, max, min.
+        year: year label for logging only.
+
+    Returns:
+        (H, W, D + D * len(stats)) array with context channels appended.
+    """
+    import numpy as np
+
+    try:
+        from scipy.ndimage import maximum_filter, minimum_filter, uniform_filter
+    except ImportError:
+        raise RuntimeError(
+            "scipy is required for spatial context features. "
+            "Install it: uv add scipy"
+        )
+
+    h, w, d = features.shape
+    context_arrays = []
+
+    for stat_name in stats:
+        stat_result = np.empty((h, w, d), dtype=features.dtype)
+
+        for ch in range(d):
+            channel = features[:, :, ch]
+            if stat_name == "mean":
+                stat_result[:, :, ch] = uniform_filter(
+                    channel, size=size, mode="reflect"
+                )
+            elif stat_name == "max":
+                stat_result[:, :, ch] = maximum_filter(
+                    channel, size=size, mode="reflect"
+                )
+            elif stat_name == "min":
+                stat_result[:, :, ch] = minimum_filter(
+                    channel, size=size, mode="reflect"
+                )
+            elif stat_name == "std":
+                # std = sqrt(E[x^2] - E[x]^2), clamped to avoid sqrt of negatives
+                mean_x = uniform_filter(channel, size=size, mode="reflect")
+                mean_x2 = uniform_filter(
+                    channel ** 2, size=size, mode="reflect"
+                )
+                variance = np.maximum(mean_x2 - mean_x ** 2, 0.0)
+                stat_result[:, :, ch] = np.sqrt(variance)
+            else:
+                raise ValueError(f"Unknown spatial context stat: {stat_name}")
+
+        context_arrays.append(stat_result)
+
+    context = np.concatenate(context_arrays, axis=-1)
+    result = np.concatenate([features, context], axis=-1)
+
+    print(
+        f"[classify] [{year}] Added spatial context: "
+        f"window={size}x{size}, stats={stats}, "
+        f"features ({h}, {w}, {d}) -> {result.shape}"
+    )
     return result
 
 

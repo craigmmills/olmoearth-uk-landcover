@@ -161,12 +161,58 @@ class TestValidateConfig:
         with pytest.raises(ValueError, match="random_state"):
             validate_config(default_config)
 
-    def test_validate_config_spatial_context_warns(self, default_config, capsys):
-        """add_spatial_context=True prints warning."""
+    def test_validate_config_spatial_context_enabled(self, default_config):
+        """add_spatial_context=True passes validation with valid size and stats."""
         default_config["features"]["add_spatial_context"] = True
-        validate_config(default_config)
-        captured = capsys.readouterr()
-        assert "add_spatial_context is not yet implemented" in captured.out
+        default_config["features"]["spatial_context_size"] = 3
+        default_config["features"]["spatial_context_stats"] = ["mean"]
+        validate_config(default_config)  # should not raise
+
+    def test_validate_config_spatial_context_size_even(self, default_config):
+        """Even spatial_context_size raises ValueError."""
+        default_config["features"]["spatial_context_size"] = 4
+        with pytest.raises(ValueError, match="spatial_context_size"):
+            validate_config(default_config)
+
+    def test_validate_config_spatial_context_size_too_small(self, default_config):
+        """spatial_context_size < 3 raises ValueError."""
+        default_config["features"]["spatial_context_size"] = 1
+        with pytest.raises(ValueError, match="spatial_context_size"):
+            validate_config(default_config)
+
+    def test_validate_config_spatial_context_size_valid(self, default_config):
+        """Odd spatial_context_size >= 3 passes validation."""
+        default_config["features"]["spatial_context_size"] = 5
+        validate_config(default_config)  # should not raise
+
+    def test_validate_config_spatial_context_size_too_large(self, default_config):
+        """spatial_context_size > 99 raises ValueError."""
+        default_config["features"]["spatial_context_size"] = 101
+        with pytest.raises(ValueError, match="spatial_context_size"):
+            validate_config(default_config)
+
+    def test_validate_config_spatial_context_stats_empty(self, default_config):
+        """Empty spatial_context_stats raises ValueError."""
+        default_config["features"]["spatial_context_stats"] = []
+        with pytest.raises(ValueError, match="spatial_context_stats"):
+            validate_config(default_config)
+
+    def test_validate_config_spatial_context_stats_invalid(self, default_config):
+        """Invalid stat name raises ValueError."""
+        default_config["features"]["spatial_context_stats"] = ["mean", "median"]
+        with pytest.raises(ValueError, match="spatial_context_stats"):
+            validate_config(default_config)
+
+    def test_validate_config_spatial_context_stats_duplicates(self, default_config):
+        """Duplicate stats raise ValueError."""
+        default_config["features"]["spatial_context_stats"] = ["mean", "mean"]
+        with pytest.raises(ValueError, match="duplicates"):
+            validate_config(default_config)
+
+    def test_validate_config_spatial_context_all_stats(self, default_config):
+        """All four valid stats pass validation."""
+        default_config["features"]["spatial_context_stats"] = ["mean", "std", "max", "min"]
+        validate_config(default_config)  # should not raise
 
 
 # ---------------------------------------------------------------------------

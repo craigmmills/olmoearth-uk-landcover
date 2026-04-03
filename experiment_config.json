@@ -25,7 +25,9 @@
     "use_embeddings": true,
     "add_ndvi": false,
     "add_ndwi": false,
-    "add_spatial_context": false
+    "add_spatial_context": false,
+    "spatial_context_size": 3,
+    "spatial_context_stats": ["mean"]
   },
   "post_processing": {
     "mode_filter_size": 0,

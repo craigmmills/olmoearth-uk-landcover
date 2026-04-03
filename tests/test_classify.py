@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 
 from src.classify import (
+    _add_spatial_context,
     _apply_min_mapping_unit,
     _apply_mode_filter,
     _apply_post_processing,
@@ -78,6 +79,135 @@ class TestAugmentFeatures:
         )
         result = _augment_features(sample_embeddings, "2021", default_config)
         assert result.shape == (h, w, 1)
+
+    def test_augment_features_spatial_context_mean(self, sample_embeddings, default_config):
+        """Shape doubles when spatial context with mean is enabled."""
+        default_config["features"]["add_spatial_context"] = True
+        default_config["features"]["spatial_context_size"] = 3
+        default_config["features"]["spatial_context_stats"] = ["mean"]
+        h, w, d = sample_embeddings.shape
+        result = _augment_features(sample_embeddings, "2021", default_config)
+        assert result.shape == (h, w, d * 2)
+
+    def test_augment_features_spatial_context_multiple_stats(self, sample_embeddings, default_config):
+        """Shape grows by D * len(stats) with multiple stats."""
+        default_config["features"]["add_spatial_context"] = True
+        default_config["features"]["spatial_context_size"] = 3
+        default_config["features"]["spatial_context_stats"] = ["mean", "std"]
+        h, w, d = sample_embeddings.shape
+        result = _augment_features(sample_embeddings, "2021", default_config)
+        assert result.shape == (h, w, d + d * 2)
+
+    def test_augment_features_spatial_context_with_ndvi(self, sample_embeddings, default_config, mocker):
+        """Spatial context applies to full feature vector including NDVI."""
+        default_config["features"]["add_spatial_context"] = True
+        default_config["features"]["add_ndvi"] = True
+        default_config["features"]["spatial_context_size"] = 3
+        default_config["features"]["spatial_context_stats"] = ["mean"]
+        h, w, d = sample_embeddings.shape
+        mocker.patch(
+            "src.classify._load_raw_band",
+            return_value=np.ones((h, w), dtype=np.float32),
+        )
+        result = _augment_features(sample_embeddings, "2021", default_config)
+        # Base: d+1 (embeddings + NDVI), context: (d+1) * 1 stat
+        assert result.shape == (h, w, (d + 1) * 2)
+
+    def test_augment_features_spatial_context_disabled(self, sample_embeddings, default_config):
+        """Spatial context disabled leaves shape unchanged."""
+        default_config["features"]["add_spatial_context"] = False
+        default_config["features"]["spatial_context_size"] = 3
+        default_config["features"]["spatial_context_stats"] = ["mean"]
+        result = _augment_features(sample_embeddings, "2021", default_config)
+        np.testing.assert_array_equal(result, sample_embeddings)
+
+    def test_augment_features_spatial_context_single_channel(self, sample_embeddings, default_config, mocker):
+        """Spatial context works with single-channel input (embeddings disabled, NDVI only)."""
+        default_config["features"]["use_embeddings"] = False
+        default_config["features"]["add_ndvi"] = True
+        default_config["features"]["add_spatial_context"] = True
+        default_config["features"]["spatial_context_size"] = 3
+        default_config["features"]["spatial_context_stats"] = ["mean"]
+        h, w, _ = sample_embeddings.shape
+        mocker.patch(
+            "src.classify._load_raw_band",
+            return_value=np.ones((h, w), dtype=np.float32),
+        )
+        result = _augment_features(sample_embeddings, "2021", default_config)
+        assert result.shape == (h, w, 2)  # 1 NDVI + 1 mean of NDVI
+
+
+# ---------------------------------------------------------------------------
+# Spatial Context Tests
+# ---------------------------------------------------------------------------
+
+
+class TestSpatialContext:
+    def test_spatial_context_mean_uniform_input(self):
+        """Mean of uniform array equals the array itself."""
+        arr = np.ones((8, 8, 2), dtype=np.float32) * 5.0
+        result = _add_spatial_context(arr, size=3, stats=["mean"], year="2021")
+        # result[:, :, 0:2] = original, result[:, :, 2:4] = mean
+        np.testing.assert_allclose(result[:, :, 2:4], 5.0, atol=1e-6)
+
+    def test_spatial_context_no_nan_or_inf(self, sample_embeddings):
+        """Result has no NaN or Inf values."""
+        result = _add_spatial_context(
+            sample_embeddings, size=3, stats=["mean", "std", "max", "min"], year="2021"
+        )
+        assert np.all(np.isfinite(result))
+
+    def test_spatial_context_std_uniform_is_zero(self):
+        """Std of uniform array is zero."""
+        arr = np.ones((8, 8, 2), dtype=np.float32) * 3.0
+        result = _add_spatial_context(arr, size=3, stats=["std"], year="2021")
+        # std channels are at indices 2:4
+        np.testing.assert_allclose(result[:, :, 2:4], 0.0, atol=1e-6)
+
+    def test_spatial_context_max_min_known_values(self):
+        """Max and min on a simple array with a single peak produce expected results."""
+        arr = np.zeros((5, 5, 1), dtype=np.float32)
+        arr[2, 2, 0] = 10.0  # single peak
+        result = _add_spatial_context(arr, size=3, stats=["max", "min"], year="2021")
+        # Shape: (5, 5, 1 + 1*2) = (5, 5, 3)
+        assert result.shape == (5, 5, 3)
+        # At (2,2): max should be 10.0, min should be 0.0
+        assert result[2, 2, 1] == 10.0  # max channel
+        assert result[2, 2, 2] == 0.0   # min channel
+        # At (0,0): peak is outside 3x3 window, max should be 0.0
+        assert result[0, 0, 1] == 0.0
+
+    def test_spatial_context_edge_handling(self):
+        """Edge pixels have valid values with reflect padding."""
+        arr = np.arange(25, dtype=np.float32).reshape(5, 5, 1)
+        result = _add_spatial_context(arr, size=3, stats=["mean"], year="2021")
+        # All values must be finite (no NaN from edge effects)
+        assert np.all(np.isfinite(result))
+        # Corner (0,0) should have a valid mean
+        assert result[0, 0, 1] > 0.0
+
+    def test_spatial_context_preserves_original(self, sample_embeddings):
+        """First D channels of result are the original features."""
+        h, w, d = sample_embeddings.shape
+        result = _add_spatial_context(
+            sample_embeddings, size=3, stats=["mean"], year="2021"
+        )
+        np.testing.assert_array_equal(result[:, :, :d], sample_embeddings)
+
+    def test_spatial_context_window_size_5(self, sample_embeddings):
+        """5x5 window produces correct shape."""
+        h, w, d = sample_embeddings.shape
+        result = _add_spatial_context(
+            sample_embeddings, size=5, stats=["mean"], year="2021"
+        )
+        assert result.shape == (h, w, d * 2)
+
+    def test_spatial_context_unknown_stat_raises(self, sample_embeddings):
+        """Unknown stat name raises ValueError."""
+        with pytest.raises(ValueError, match="Unknown spatial context stat"):
+            _add_spatial_context(
+                sample_embeddings, size=3, stats=["median"], year="2021"
+            )
 
 
 class TestComputeSpectralIndex:
