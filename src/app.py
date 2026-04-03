@@ -118,6 +118,85 @@ def load_iteration_details(iteration_num: int) -> dict:
     }
 
 
+def _render_hypothesis_callout(hypothesis: dict | None, iteration_num: int) -> None:
+    """Render hypothesis as a prominent callout box at top of iteration card.
+
+    parameter_changes are intentionally omitted here because the config diff
+    section (rendered immediately below) shows the same parameters with
+    before/after context, which is more informative.
+    """
+    if hypothesis:
+        component = hypothesis.get("component", "N/A")
+        text = hypothesis.get("hypothesis", "")
+        expected_impact = hypothesis.get("expected_impact")
+        confidence = hypothesis.get("confidence")
+
+        # Build callout content
+        lines = [f"**Component:** `{component}`"]
+        if isinstance(confidence, (int, float)):
+            lines.append(f"**Confidence:** {confidence:.0%}")
+        lines.append("")  # blank line before hypothesis text
+        lines.append(text)
+        if expected_impact:
+            lines.append("")
+            lines.append(f"**Expected impact:** {expected_impact}")
+
+        st.info("\n".join(lines))
+    elif iteration_num == 1:
+        st.info("**Baseline** \u2014 default configuration")
+    else:
+        # Iteration > 1 but no hypothesis (legacy/missing data)
+        st.warning("No hypothesis recorded for this iteration.")
+
+
+def _render_config_diff_inline(config_diff: dict | None, iteration_num: int) -> None:
+    """Render config changes as compact inline before/after values."""
+    if config_diff:
+        st.markdown("**Config Changes:**")
+        for param, vals in config_diff.items():
+            old_val = vals.get("a", "?")
+            new_val = vals.get("b", "?")
+            st.markdown(f"- `{param}`: {old_val} \u2192 {new_val}")
+    elif iteration_num > 1:
+        st.caption("No configuration changes from previous iteration.")
+    elif iteration_num == 1:
+        st.caption("Baseline \u2014 no prior config to compare.")
+
+
+def _render_gemini_summary(evaluations: dict) -> None:
+    """Render Gemini overall assessment and key recommendations prominently."""
+    has_any = False
+    for year in ["2021", "2023"]:
+        eval_data = evaluations.get(year)
+        if not eval_data:
+            continue
+        evaluation = eval_data.get("evaluation", {})
+        overall_score = evaluation.get("overall_score")
+        spatial_quality = evaluation.get("spatial_quality")
+        recommendations = evaluation.get("recommendations", [])
+
+        if overall_score is None and not recommendations:
+            continue
+
+        has_any = True
+        st.markdown(f"**Gemini Assessment \u2014 {year}:**")
+        parts = []
+        if overall_score is not None:
+            parts.append(f"Score: **{overall_score}/10**")
+        if spatial_quality:
+            parts.append(f"Spatial quality: {spatial_quality}")
+        if parts:
+            st.markdown(" \u00b7 ".join(parts))
+
+        if recommendations:
+            st.markdown("Key recommendations:")
+            for rec in recommendations:
+                st.markdown(f"- {rec}")
+
+    if not has_any:
+        st.caption("No Gemini evaluation available.")
+
+
 def render_iteration_card(data: dict, is_best: bool) -> None:
     """Render one iteration as a collapsible expander with full details."""
     import pandas as pd
@@ -129,12 +208,14 @@ def render_iteration_card(data: dict, is_best: bool) -> None:
     timestamp = metadata.get("timestamp", "")
 
     # Build expander label with status badge
-    status_icon = {"accepted": "✅", "reverted": "❌", "pending": "⏳"}.get(status, "❓")
-    best_tag = " ⭐ BEST" if is_best else ""
-    label = f"Iteration {iteration_num:03d} — {status_icon} {status}{best_tag}"
+    status_icon = {"accepted": "\u2705", "reverted": "\u274c", "pending": "\u23f3"}.get(status, "\u2753")
+    best_tag = " \u2b50 BEST" if is_best else ""
+    label = f"Iteration {iteration_num:03d} \u2014 {status_icon} {status}{best_tag}"
 
     with st.expander(label, expanded=is_best):
-        # --- Header metrics row ---
+        # ---------------------------------------------------------------
+        # Section 1: Header metrics row (UNCHANGED)
+        # ---------------------------------------------------------------
         cols = st.columns(4)
         with cols[0]:
             st.metric("Status", status.capitalize())
@@ -142,147 +223,190 @@ def render_iteration_card(data: dict, is_best: bool) -> None:
             acc = metrics.get("overall_accuracy")
             st.metric("Accuracy", f"{acc:.4f}" if acc is not None else "N/A")
         with cols[2]:
-            # Gemini score from evaluation
             eval_data = data["evaluations"].get("2021")
             if eval_data:
                 gemini_score = eval_data.get("evaluation", {}).get("overall_score")
-                st.metric("Gemini Score", f"{gemini_score}/10" if gemini_score is not None else "N/A")
+                st.metric(
+                    "Gemini Score",
+                    f"{gemini_score}/10" if gemini_score is not None else "N/A",
+                )
             else:
                 st.metric("Gemini Score", "N/A")
         with cols[3]:
             st.metric("Timestamp", timestamp[:10] if timestamp else "N/A")
 
-        # --- Score delta (vs previous) ---
+        # ---------------------------------------------------------------
+        # Section 2: Score delta vs previous (UNCHANGED)
+        # ---------------------------------------------------------------
         if data["metrics_diff"]:
             acc_diff = data["metrics_diff"]["overall_accuracy"]
             delta = acc_diff["delta"]
             delta_color = "green" if delta > 0 else ("red" if delta < 0 else "gray")
             st.markdown(
-                f"**Accuracy change:** {acc_diff['a']:.4f} → {acc_diff['b']:.4f} "
+                f"**Accuracy change:** {acc_diff['a']:.4f} \u2192 {acc_diff['b']:.4f} "
                 f"(<span style='color:{delta_color}'>{delta:+.4f}</span>)",
                 unsafe_allow_html=True,
             )
 
-        # --- Hypothesis ---
-        hypothesis = data["hypothesis"]
-        if hypothesis:
-            st.subheader("Hypothesis")
-            st.markdown(f"**Component:** {hypothesis.get('component', 'N/A')}")
-            st.markdown(hypothesis.get("hypothesis", ""))
-            if hypothesis.get("parameter_changes"):
-                st.markdown("**Parameter changes:**")
-                for param, value in hypothesis["parameter_changes"].items():
-                    st.markdown(f"- `{param}`: {value}")
-            if hypothesis.get("expected_impact"):
-                st.markdown(f"**Expected impact:** {hypothesis['expected_impact']}")
-        elif iteration_num == 1:
-            st.caption("Baseline iteration — no hypothesis.")
+        # ---------------------------------------------------------------
+        # Section 3: Hypothesis callout (MOVED UP, NEW FORMAT)
+        # ---------------------------------------------------------------
+        _render_hypothesis_callout(data["hypothesis"], iteration_num)
 
-        # --- Per-class F1 scores ---
+        # ---------------------------------------------------------------
+        # Section 4: Config diff inline (MOVED UP, NEW FORMAT)
+        # ---------------------------------------------------------------
+        _render_config_diff_inline(data.get("config_diff"), iteration_num)
+
+        # ---------------------------------------------------------------
+        # Section 5: Gemini feedback summary (MOVED UP, NEW FORMAT)
+        # ---------------------------------------------------------------
+        _render_gemini_summary(data["evaluations"])
+
+        # ---------------------------------------------------------------
+        # Section 6: Per-class F1 scores (MOVED DOWN, in sub-expander)
+        # ---------------------------------------------------------------
         per_class = metrics.get("per_class", {})
         if per_class:
-            st.subheader("Per-Class F1 Scores")
-            f1_data = {
-                name: scores.get("f1", 0)
-                for name, scores in per_class.items()
-            }
-            df_f1 = pd.DataFrame({
-                "Class": list(f1_data.keys()),
-                "F1 Score": list(f1_data.values()),
-            })
-            st.bar_chart(df_f1, x="Class", y="F1 Score")
+            with st.expander("Per-Class F1 Scores", expanded=False):
+                f1_data = {
+                    name: scores.get("f1", 0)
+                    for name, scores in per_class.items()
+                }
+                df_f1 = pd.DataFrame({
+                    "Class": list(f1_data.keys()),
+                    "F1 Score": list(f1_data.values()),
+                })
+                st.bar_chart(df_f1, x="Class", y="F1 Score")
 
-        # --- Gemini Evaluation Details ---
+        # ---------------------------------------------------------------
+        # Section 7: Gemini detailed evaluation (MOVED DOWN, in sub-expander)
+        # Recommendations shown in summary above (Section 5)
+        # ---------------------------------------------------------------
         for year in ["2021", "2023"]:
             eval_data = data["evaluations"].get(year)
             if not eval_data:
                 continue
-
             evaluation = eval_data.get("evaluation", {})
-            st.subheader(f"Gemini Evaluation — {year}")
-
-            # Per-class scores from evaluation
             eval_per_class = evaluation.get("per_class", [])
-            if eval_per_class:
-                for item in eval_per_class:
-                    st.markdown(
-                        f"- **{item.get('class_name', '?')}** "
-                        f"({item.get('score', '?')}/10): "
-                        f"{item.get('notes', '')}"
-                    )
-
-            # Error regions
             error_regions = evaluation.get("error_regions", [])
-            if error_regions:
-                st.markdown("**Error Regions:**")
-                for region in error_regions:
-                    severity = region.get("severity", "unknown")
-                    st.markdown(
-                        f"- [{severity.upper()}] {region.get('location', '?')}: "
-                        f"expected {region.get('expected', '?')}, "
-                        f"predicted {region.get('predicted', '?')}"
-                    )
 
-            # Recommendations
-            recommendations = evaluation.get("recommendations", [])
-            if recommendations:
-                st.markdown("**Recommendations:**")
-                for rec in recommendations:
-                    st.markdown(f"- {rec}")
+            if eval_per_class or error_regions:
+                with st.expander(f"Gemini Details \u2014 {year}", expanded=False):
+                    if eval_per_class:
+                        st.markdown("**Per-class scores:**")
+                        for item in eval_per_class:
+                            st.markdown(
+                                f"- **{item.get('class_name', '?')}** "
+                                f"({item.get('score', '?')}/10): "
+                                f"{item.get('notes', '')}"
+                            )
+                    if error_regions:
+                        st.markdown("**Error Regions:**")
+                        for region in error_regions:
+                            severity = region.get("severity", "unknown")
+                            st.markdown(
+                                f"- [{severity.upper()}] "
+                                f"{region.get('location', '?')}: "
+                                f"expected {region.get('expected', '?')}, "
+                                f"predicted {region.get('predicted', '?')}"
+                            )
 
-        # --- Comparison Images ---
+        # ---------------------------------------------------------------
+        # Section 8: Comparison Images (MOVED DOWN, in sub-expander)
+        # ---------------------------------------------------------------
         has_images = any(v is not None for v in data["images"].values())
         if has_images:
-            st.subheader("Comparison Images")
-            for year in ["2021", "2023"]:
-                full_img = data["images"].get(f"{year}_full")
-                if full_img:
-                    st.markdown(f"**{year} — Full View:**")
-                    st.image(str(full_img), use_container_width=True)
+            with st.expander("Comparison Images", expanded=False):
+                for year in ["2021", "2023"]:
+                    full_img = data["images"].get(f"{year}_full")
+                    if full_img:
+                        st.markdown(f"**{year} \u2014 Full View:**")
+                        st.image(str(full_img), use_container_width=True)
 
-                # Quadrants in 2x2 grid
-                quadrant_keys = [f"{year}_nw", f"{year}_ne", f"{year}_sw", f"{year}_se"]
-                quadrant_imgs = [data["images"].get(k) for k in quadrant_keys]
-                if any(q is not None for q in quadrant_imgs):
-                    st.markdown(f"**{year} — Quadrants:**")
-                    q_col1, q_col2 = st.columns(2)
-                    with q_col1:
-                        if quadrant_imgs[0]:
-                            st.image(str(quadrant_imgs[0]), caption="NW", use_container_width=True)
-                        if quadrant_imgs[2]:
-                            st.image(str(quadrant_imgs[2]), caption="SW", use_container_width=True)
-                    with q_col2:
-                        if quadrant_imgs[1]:
-                            st.image(str(quadrant_imgs[1]), caption="NE", use_container_width=True)
-                        if quadrant_imgs[3]:
-                            st.image(str(quadrant_imgs[3]), caption="SE", use_container_width=True)
+                    quadrant_keys = [
+                        f"{year}_nw", f"{year}_ne",
+                        f"{year}_sw", f"{year}_se",
+                    ]
+                    quadrant_imgs = [data["images"].get(k) for k in quadrant_keys]
+                    if any(q is not None for q in quadrant_imgs):
+                        st.markdown(f"**{year} \u2014 Quadrants:**")
+                        q_col1, q_col2 = st.columns(2)
+                        with q_col1:
+                            if quadrant_imgs[0]:
+                                st.image(
+                                    str(quadrant_imgs[0]),
+                                    caption="NW",
+                                    use_container_width=True,
+                                )
+                            if quadrant_imgs[2]:
+                                st.image(
+                                    str(quadrant_imgs[2]),
+                                    caption="SW",
+                                    use_container_width=True,
+                                )
+                        with q_col2:
+                            if quadrant_imgs[1]:
+                                st.image(
+                                    str(quadrant_imgs[1]),
+                                    caption="NE",
+                                    use_container_width=True,
+                                )
+                            if quadrant_imgs[3]:
+                                st.image(
+                                    str(quadrant_imgs[3]),
+                                    caption="SE",
+                                    use_container_width=True,
+                                )
 
-        # --- Config Diff ---
-        config_diff = data.get("config_diff")
-        if config_diff:
-            st.subheader("Config Changes vs Previous")
-            diff_rows = []
-            for param, vals in config_diff.items():
-                diff_rows.append({
-                    "Parameter": param,
-                    "Previous": str(vals.get("a", "")),
-                    "Current": str(vals.get("b", "")),
-                })
-            if diff_rows:
-                st.dataframe(diff_rows, hide_index=True, use_container_width=True)
-        elif iteration_num > 1:
-            # VF-4 fix: show explicit message for identical configs
-            st.caption("No configuration changes from previous iteration.")
-        elif iteration_num == 1:
-            st.caption("Baseline iteration — no prior config to compare.")
+
+def _detect_loop_status() -> str:
+    """Detect whether the autocorrect loop is running, complete, or idle.
+
+    Returns one of: "running", "complete", "idle".
+    - "running": experiments exist and at least one iteration has "pending" status
+    - "complete": experiments exist and SUMMARY.md is present (loop finished)
+    - "idle": no experiments found
+    """
+    if not check_experiments_exist():
+        return "idle"
+
+    # Check for pending iterations (indicates loop is still running)
+    from src.experiment import list_iterations
+
+    iterations = list_iterations()
+    if any(it["status"] == "pending" for it in iterations):
+        return "running"
+
+    # SUMMARY.md presence indicates the loop ran to completion
+    summary_path = config.EXPERIMENTS_DIR / "SUMMARY.md"
+    if summary_path.exists():
+        return "complete"
+
+    # Experiments exist but no pending and no summary -- likely still in progress
+    # (summary is written at end of loop)
+    return "running"
 
 
+@st.fragment(run_every=10)
 def render_experiments_section() -> None:
-    """Render the full experiments timeline section."""
+    """Render the full experiments timeline section.
+
+    Uses @st.fragment(run_every=10) to auto-refresh every 10 seconds,
+    allowing live monitoring of the autocorrect loop without affecting
+    the Map View tab.
+    """
     from src.experiment import list_iterations
 
     st.header("Experiment History")
     st.markdown("Timeline of all autocorrect iterations with hypotheses, scores, and Gemini feedback.")
+
+    # Show loop status indicator
+    loop_status = _detect_loop_status()
+    if loop_status == "running":
+        st.status("Loop running... (auto-refreshing every 10s)", state="running")
+    elif loop_status == "complete":
+        st.success("Loop complete")
 
     # Guard: no experiments
     if not check_experiments_exist():
