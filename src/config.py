@@ -154,3 +154,9 @@ GEMINI_MODEL: str = "gemini-2.5-flash"
 GEMINI_MAX_RETRIES: int = 3
 GEMINI_BASE_DELAY: float = 4.0   # seconds, base for exponential backoff
 GEMINI_RATE_LIMIT_PAUSE: float = 5.0  # seconds between year evaluations
+
+# ---------------------------------------------------------------------------
+# Diagnostician (Issue #7)
+# ---------------------------------------------------------------------------
+DIAGNOSE_MODEL: str = "claude-sonnet-4-20250514"  # Update when newer models available
+MAX_HISTORY_ENTRIES: int = 20

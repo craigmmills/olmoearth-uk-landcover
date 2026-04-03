@@ -128,3 +128,72 @@ def mock_gemini_response():
             "recommendations": ["More training data"],
         }
     return _make
+
+
+@pytest.fixture
+def sample_metrics():
+    """Return sample classification metrics matching metrics.json schema."""
+    return {
+        "overall_accuracy": 0.7523,
+        "evaluation_year": "2021",
+        "per_class": {
+            "Built-up": {"precision": 0.80, "recall": 0.70, "f1": 0.75, "support": 1000},
+            "Cropland": {"precision": 0.90, "recall": 0.85, "f1": 0.87, "support": 2000},
+            "Grassland": {"precision": 0.60, "recall": 0.55, "f1": 0.57, "support": 1500},
+            "Tree cover": {"precision": 0.70, "recall": 0.65, "f1": 0.67, "support": 800},
+            "Water": {"precision": 0.95, "recall": 0.90, "f1": 0.92, "support": 300},
+            "Other": {"precision": 0.40, "recall": 0.30, "f1": 0.34, "support": 500},
+        },
+        "weighted_avg": {"precision": 0.75, "recall": 0.72, "f1": 0.73},
+        "confusion_matrix": [
+            [700, 50, 100, 50, 0, 100],
+            [30, 1700, 150, 50, 0, 70],
+            [50, 200, 825, 200, 25, 200],
+            [30, 50, 150, 520, 0, 50],
+            [0, 0, 10, 0, 270, 20],
+            [100, 50, 100, 50, 20, 180],
+        ],
+        "confusion_matrix_axes": {"rows": "true_class", "columns": "predicted_class"},
+        "class_names": ["Built-up", "Cropland", "Grassland", "Tree cover", "Water", "Other"],
+        "training_accuracy": 0.95,
+        "n_training_samples": 30000,
+    }
+
+
+@pytest.fixture
+def sample_evaluation():
+    """Return sample VLM evaluation result matching Issue #6 schema."""
+    return {
+        "year": "2021",
+        "timestamp": "2026-04-03T12:00:00Z",
+        "model": "gemini-2.5-flash",
+        "temperature": 0.0,
+        "evaluation": {
+            "overall_score": 7,
+            "per_class": [
+                {"class_name": "Built-up", "score": 8.0, "notes": "Well detected in urban core"},
+                {"class_name": "Cropland", "score": 8.5, "notes": "Good coverage"},
+                {"class_name": "Grassland", "score": 5.0, "notes": "Confused with cropland"},
+                {"class_name": "Tree cover", "score": 6.0, "notes": "Underdetected in hedgerows"},
+                {"class_name": "Water", "score": 9.0, "notes": "Excellent river detection"},
+                {"class_name": "Other", "score": 3.0, "notes": "Miscellaneous, often missed"},
+            ],
+            "error_regions": [
+                {"location": "NW quadrant", "expected": "Cropland",
+                 "predicted": "Grassland", "severity": "high"},
+                {"location": "SE rural fringe", "expected": "Tree cover",
+                 "predicted": "Grassland", "severity": "medium"},
+            ],
+            "spatial_quality": "Moderate salt-and-pepper noise in rural areas",
+            "confidence": 0.75,
+            "recommendations": ["Enable post-processing to reduce noise",
+                                "Consider boundary exclusion"],
+        },
+        "image_paths": ["comparison_2021.png"],
+        "summary": {
+            "overall_score": 7,
+            "confidence": 0.75,
+            "num_error_regions": 2,
+            "num_recommendations": 2,
+        },
+    }
