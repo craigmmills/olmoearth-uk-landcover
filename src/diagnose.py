@@ -944,10 +944,13 @@ def run_diagnosis(iteration: int | None = None) -> Hypothesis:
     print(f"[diagnose] Proposing Tier {tier} changes")
 
     # Step 5: Generate hypothesis
+    # Try Claude CLI (subscription) or API key, fall back to rule-based
+    import shutil
+    has_cli = shutil.which("claude") is not None
     has_api_key = bool(os.environ.get("ANTHROPIC_API_KEY"))
     source = "unknown"
 
-    if has_api_key:
+    if has_cli or has_api_key:
         system_prompt, user_prompt = _build_diagnosis_prompt(
             metrics, evaluation, history_summary, current_config, tier,
         )
@@ -955,12 +958,12 @@ def run_diagnosis(iteration: int | None = None) -> Hypothesis:
             hypothesis = _call_claude(system_prompt, user_prompt)
             source = "claude"
         except (RuntimeError, ValueError) as e:
-            print(f"[diagnose] Claude API failed: {e}")
+            print(f"[diagnose] Claude failed: {e}")
             print("[diagnose] Falling back to rule-based diagnosis")
             hypothesis = _rule_based_diagnosis(metrics, current_config, tier)
             source = "rule_based"
     else:
-        print("[diagnose] No ANTHROPIC_API_KEY set, using rule-based diagnosis")
+        print("[diagnose] No Claude CLI or ANTHROPIC_API_KEY, using rule-based diagnosis")
         hypothesis = _rule_based_diagnosis(metrics, current_config, tier)
         source = "rule_based"
 
