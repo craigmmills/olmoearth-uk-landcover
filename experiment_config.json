@@ -1,0 +1,22 @@
+{
+  "training": {
+    "max_samples_per_class": 5000,
+    "exclude_boundary_pixels": false,
+    "boundary_buffer_px": 0,
+    "classifier": "RandomForest",
+    "n_estimators": 100,
+    "max_depth": 20,
+    "class_weight": "balanced",
+    "random_state": 42
+  },
+  "features": {
+    "use_embeddings": true,
+    "add_ndvi": false,
+    "add_ndwi": false,
+    "add_spatial_context": false
+  },
+  "post_processing": {
+    "mode_filter_size": 0,
+    "min_mapping_unit_px": 0
+  }
+}

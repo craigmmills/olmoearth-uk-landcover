@@ -18,6 +18,7 @@ all = [
     "torch>=2.4",
     "olmoearth-pretrain",
     "scikit-learn",
+    "scipy",
     "rioxarray",
     "streamlit",
     "folium",

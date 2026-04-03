@@ -140,3 +140,8 @@ SCL_MASK_VALUES: set[int] = {1, 3, 8, 9, 10}
 
 # Embedding output directory
 EMBEDDINGS_DIR: Path = OUTPUT_DIR / "embeddings"
+
+# ---------------------------------------------------------------------------
+# Experiment Tracking
+# ---------------------------------------------------------------------------
+EXPERIMENTS_DIR: Path = PROJECT_ROOT / "experiments"

@@ -7,4 +7,5 @@ __pycache__/
 .streamlit/
 *.tif
 *.tiff
+experiments/
 .DS_Store
