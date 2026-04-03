@@ -2,6 +2,7 @@ import pytest
 import numpy as np
 import json
 from pathlib import Path
+from unittest.mock import MagicMock
 
 
 @pytest.fixture
@@ -64,4 +65,66 @@ def tmp_config(tmp_path):
         with open(path, "w") as f:
             json.dump(cfg, f)
         return path
+    return _make
+
+
+@pytest.fixture
+def sample_rgb():
+    """512x512x3 uint8 RGB array."""
+    return np.random.randint(0, 256, (512, 512, 3), dtype=np.uint8)
+
+
+@pytest.fixture
+def sample_classification():
+    """512x512 uint8 classification array with values 0-5."""
+    return np.random.randint(0, 6, (512, 512), dtype=np.uint8)
+
+
+@pytest.fixture
+def sample_worldcover():
+    """512x512 uint8 WorldCover array with ESA codes."""
+    codes = [10, 20, 30, 40, 50, 60, 70, 80, 90, 95, 100]
+    return np.random.choice(codes, (512, 512)).astype(np.uint8)
+
+
+@pytest.fixture
+def mock_rasterio_dataset():
+    """Factory fixture returning a mock rasterio dataset context manager.
+
+    When called with a band argument (e.g. src.read(1)), returns 2D data.
+    When called without arguments, returns 3D (1, H, W) data.
+    """
+    def _make(data, height=512, width=512, crs="EPSG:32631"):
+        mock_ds = MagicMock()
+
+        def read_side_effect(band=None):
+            if band is not None:
+                # src.read(1) returns 2D array
+                return data
+            # src.read() returns 3D array
+            return data.reshape(1, height, width) if data.ndim == 2 else data
+
+        mock_ds.read.side_effect = read_side_effect
+        mock_ds.height = height
+        mock_ds.width = width
+        mock_ds.crs = crs
+        mock_ds.bounds = (0, 0, width * 10, height * 10)
+        mock_ds.__enter__ = MagicMock(return_value=mock_ds)
+        mock_ds.__exit__ = MagicMock(return_value=False)
+        return mock_ds
+    return _make
+
+
+@pytest.fixture
+def mock_gemini_response():
+    """Factory fixture returning a mock Gemini response."""
+    def _make(overall_score=7, confidence=0.8):
+        return {
+            "overall_score": overall_score,
+            "per_class": [{"class_name": "Built-up", "score": 8, "notes": "Good"}],
+            "error_regions": [],
+            "spatial_quality": "Sharp boundaries",
+            "confidence": confidence,
+            "recommendations": ["More training data"],
+        }
     return _make

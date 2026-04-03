@@ -40,6 +40,13 @@ def run_pipeline() -> None:
     from src.change import run_change_detection
     run_change_detection()
 
+    # Step 5: Evaluation
+    print("\n" + "=" * 60)
+    print("STEP 5: VLM Evaluation")
+    print("=" * 60)
+    from src.evaluate import run_evaluation
+    run_evaluation()
+
     print("\n" + "=" * 60)
     print("PIPELINE COMPLETE")
     print("=" * 60)
@@ -48,6 +55,7 @@ def run_pipeline() -> None:
     print("  landcover_2023.tif  — classified landcover map for 2023")
     print("  change_map.tif      — pixel-wise change detection")
     print("  transitions.json    — transition matrix and statistics")
+    print("  evaluations/     - comparison images + VLM scores")
     print("\nVisualize: uv run streamlit run src/app.py")
 
 

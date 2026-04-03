@@ -145,3 +145,12 @@ EMBEDDINGS_DIR: Path = OUTPUT_DIR / "embeddings"
 # Experiment Tracking
 # ---------------------------------------------------------------------------
 EXPERIMENTS_DIR: Path = PROJECT_ROOT / "experiments"
+
+# ---------------------------------------------------------------------------
+# Evaluation Pipeline (Issue 6)
+# ---------------------------------------------------------------------------
+EVALUATION_DIR: Path = OUTPUT_DIR / "evaluations"
+GEMINI_MODEL: str = "gemini-2.5-flash"
+GEMINI_MAX_RETRIES: int = 3
+GEMINI_BASE_DELAY: float = 4.0   # seconds, base for exponential backoff
+GEMINI_RATE_LIMIT_PAUSE: float = 5.0  # seconds between year evaluations
