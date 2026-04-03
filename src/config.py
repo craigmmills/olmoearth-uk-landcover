@@ -5,18 +5,18 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 # AOI Definition - Cambridge, UK
 # ---------------------------------------------------------------------------
-AOI_CENTER_LAT: float = 52.205   # degrees North
-AOI_CENTER_LON: float = 0.12     # degrees East
+AOI_CENTER_LAT: float = 50.72    # degrees North
+AOI_CENTER_LON: float = -3.50    # degrees West  (near Exeter, Devon — solidly in zone 30)
 AOI_EXTENT_KM: float = 5.0       # km per side
 AOI_RESOLUTION_M: int = 10       # meters per pixel
 AOI_SIZE_PX: int = 512           # pixels per side (512 * 10m = 5120m)
 
 # ---------------------------------------------------------------------------
 # CRS
-# Cambridge (0.12E) technically falls in UTM Zone 31N, but Sentinel-2 tile
-# T30UYC covering this area uses EPSG:32630 (UTM Zone 30N).
+# Cambridge (0.12E) falls in UTM Zone 31N (0°-6°E). Zone 30 tiles only clip
+# the western edge. Zone 31 tiles fully cover Cambridge.
 # ---------------------------------------------------------------------------
-TARGET_CRS: str = "EPSG:32630"
+TARGET_CRS: str = "EPSG:32631"
 
 # ---------------------------------------------------------------------------
 # Time Ranges - summer months only (June-August)

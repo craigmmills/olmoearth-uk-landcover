@@ -159,7 +159,7 @@ def create_map(
 
 def main():
     st.title("OlmoEarth UK Landcover Demo")
-    st.markdown("Cambridge, UK — 5km x 5km AOI — OlmoEarth Tiny embeddings")
+    st.markdown("Exeter, Devon — 5km x 5km AOI — OlmoEarth Tiny embeddings")
 
     if not check_outputs_exist():
         st.error(
