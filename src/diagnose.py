@@ -475,7 +475,6 @@ def _call_claude(system_prompt: str, user_prompt: str) -> Hypothesis:
                         claude_path, "-p",
                         "--output-format", "json",
                         "--json-schema", hypothesis_schema,
-                        "--bare",
                         "--allowedTools", "",
                         "--max-budget-usd", "0.50",
                     ],
