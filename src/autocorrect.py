@@ -392,6 +392,8 @@ def _print_summary(summary: dict) -> None:
             iter_str = f"{h['iteration']:03d}" if h["iteration"] is not None else "N/A"
             print(f"[autocorrect]   Iteration {iter_str}: {h['reason']}")
 
+    _print_final_table(summary["history"])
+
     print(f"{'=' * 60}")
 
 
@@ -501,6 +503,197 @@ def _save_summary_md(summary: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Section 7a: Progress Display
+# ---------------------------------------------------------------------------
+
+def _format_progress_bar(current: int, total: int, width: int = 10) -> str:
+    """Format a progress bar string: [2/5] ████░░░░░░ 40%
+
+    Args:
+        current: Current iteration (0 = baseline, 1+ = improvement).
+        total: Total improvement iterations.
+        width: Character width of the bar (default 10).
+
+    Returns:
+        Formatted progress bar string.
+    """
+    if total <= 0:
+        fraction = 0.0
+    else:
+        fraction = min(current / total, 1.0)
+    filled = round(fraction * width)
+    empty = width - filled
+    pct = round(fraction * 100)
+    return f"[{current}/{total}] {'█' * filled}{'░' * empty} {pct}%"
+
+
+def _print_phase_status(phase: str, message: str) -> None:
+    """Print an inline status line for a long-running operation.
+
+    Example: [classify] Training...
+
+    Args:
+        phase: Module name (classify, evaluate, diagnose).
+        message: Status message (e.g., "Training...").
+    """
+    print(f"[{phase}] {message}")
+
+
+def _print_iteration_box(
+    iteration_index: int,
+    max_iterations: int,
+    hypothesis: str | None,
+    prev_score: float,
+    new_score: float,
+    accepted: bool,
+    class_scores: dict[str, float],
+) -> None:
+    """Print a box-drawing summary after each iteration's accept/revert decision.
+
+    Example:
+        ┌─ Iteration 2/5 ─────────────────────────────┐
+        │ Hypothesis: Add NDVI features (Tier 1)       │
+        │ Score: 6.0 → 7.2 (+1.2) ✓ ACCEPTED          │
+        │ Best classes: Other (9.4), Cropland (8.4)    │
+        │ Worst class: Water (4.8)                     │
+        └──────────────────────────────────────────────┘
+
+    Args:
+        iteration_index: 1-based iteration number (improvement iterations only).
+        max_iterations: Total iterations including baseline (N in run_autocorrect).
+        hypothesis: Human-readable hypothesis text, or None.
+        prev_score: Best score before this iteration (0-10).
+        new_score: Score of this iteration (0-10).
+        accepted: Whether the iteration was accepted.
+        class_scores: Per-class scores dict {class_name: score}. May be empty.
+    """
+    box_w = 48  # total outer width including borders
+    inner_w = box_w - 2  # content area between │ chars
+
+    # Title line: ┌─ Iteration X/Y ─...─┐
+    total_improvement = max_iterations - 1
+    title_text = f" Iteration {iteration_index}/{total_improvement} "
+    top = ("┌─" + title_text).ljust(box_w - 1, "─") + "┐"
+    print(top)
+
+    def _line(text: str) -> str:
+        """Format a content line padded to inner_w, bordered with │."""
+        return "│ " + text.ljust(inner_w - 2) + " │"
+
+    # Hypothesis line
+    hyp_text = hypothesis if hypothesis else "(Baseline)"
+    max_hyp_len = inner_w - 2 - len("Hypothesis: ")  # = 32
+    if len(hyp_text) > max_hyp_len:
+        hyp_text = hyp_text[: max_hyp_len - 3] + "..."
+    print(_line(f"Hypothesis: {hyp_text}"))
+
+    # Score line
+    delta = new_score - prev_score
+    decision = "✓ ACCEPTED" if accepted else "✗ REVERTED"
+    print(_line(f"Score: {prev_score:.1f} → {new_score:.1f} ({delta:+.1f}) {decision}"))
+
+    # Best/worst class lines (only if class_scores is non-empty)
+    if class_scores:
+        sorted_classes = sorted(class_scores.items(), key=lambda x: x[1], reverse=True)
+        # Best classes (top 2)
+        top_n = sorted_classes[:2]
+        best_str = ", ".join(f"{name} ({score:.1f})" for name, score in top_n)
+        print(_line(f"Best classes: {best_str}"))
+        # Worst class (bottom 1)
+        worst_name, worst_score = sorted_classes[-1]
+        print(_line(f"Worst class: {worst_name} ({worst_score:.1f})"))
+
+    # Bottom border
+    print("└" + "─" * (box_w - 2) + "┘")
+
+
+def _print_final_table(history: list[dict]) -> None:
+    """Print a formatted table of all iterations at the end of the loop.
+
+    Example:
+        ┌─ Iteration Summary ──────────────────────────────────────────────┐
+        │  #  │ Status   │ Score │ Delta  │ Hypothesis                     │
+        │─────┼──────────┼───────┼────────┼────────────────────────────────│
+        │ 001 │ accepted │  7.52 │   --   │ (Baseline)                     │
+        │ 002 │ accepted │  7.80 │ +0.28  │ Add NDVI features              │
+        │ 003 │ reverted │  7.60 │ -0.20  │ Increase trees                 │
+        └──────────────────────────────────────────────────────────────────┘
+
+    Args:
+        history: List of history entry dicts from the autocorrect loop.
+    """
+    # Column widths (content only, not including separators)
+    c_num = 3       # iteration number
+    c_status = 8    # status string
+    c_score = 5     # score value
+    c_delta = 6     # delta value
+    c_hyp = 30      # hypothesis text
+
+    # Total width: │ + space + col + space + │ for each column
+    # 5 columns, each with " col " padding = col + 2 spaces each
+    # 4 inner │ separators + 2 outer │ = 6 border chars
+    # total = (c_num+2) + (c_status+2) + (c_score+2) + (c_delta+2) + (c_hyp+2) + 6
+    table_w = c_num + c_status + c_score + c_delta + c_hyp + 16
+
+    # Title
+    title_text = " Iteration Summary "
+    top = ("┌─" + title_text).ljust(table_w - 1, "─") + "┐"
+    print(top)
+
+    def _row(num: str, status: str, score: str, delta: str, hyp: str) -> str:
+        return (f"│ {num:>{c_num}} │ {status:<{c_status}} │ "
+                f"{score:>{c_score}} │ {delta:>{c_delta}} │ {hyp:<{c_hyp}} │")
+
+    # Header row
+    print(_row("#", "Status", "Score", "Delta", "Hypothesis"))
+
+    # Separator row
+    sep = (f"│{'─' * (c_num + 2)}┼{'─' * (c_status + 2)}┼"
+           f"{'─' * (c_score + 2)}┼{'─' * (c_delta + 2)}┼"
+           f"{'─' * (c_hyp + 2)}│")
+    print(sep)
+
+    if not history:
+        print(_row("", "", "", "", "(no iterations)"))
+    else:
+        prev_score: float | None = None
+        for h in history:
+            # Iteration number
+            num_str = f"{h['iteration']:03d}" if h["iteration"] is not None else "N/A"
+
+            # Status
+            status_str = h["status"]
+
+            # Score
+            score_str = f"{h['score']:.2f}" if h["score"] is not None else "N/A"
+
+            # Delta (relative to previous non-None score)
+            if prev_score is not None and h["score"] is not None:
+                d = h["score"] - prev_score
+                delta_str = f"{d:+.2f}"
+            elif h["score"] is not None and prev_score is None:
+                delta_str = "--"
+            else:
+                delta_str = "N/A"
+
+            # Hypothesis (truncated)
+            hyp_raw = h.get("hypothesis") or "(Baseline)"
+            if len(hyp_raw) > c_hyp:
+                hyp_str = hyp_raw[: c_hyp - 3] + "..."
+            else:
+                hyp_str = hyp_raw
+
+            print(_row(num_str, status_str, score_str, delta_str, hyp_str))
+
+            # Track previous score for delta
+            if h["score"] is not None:
+                prev_score = h["score"]
+
+    # Bottom border
+    print("└" + "─" * (table_w - 2) + "┘")
+
+
+# ---------------------------------------------------------------------------
 # Section 8: Main Loop
 # ---------------------------------------------------------------------------
 
@@ -569,6 +762,7 @@ def run_autocorrect(
 
     save_config(best_cfg)  # Ensure config on disk matches loaded config
 
+    _print_phase_status("classify", "Training baseline classifier...")
     try:
         run_classification()
     except Exception as e:
@@ -587,6 +781,7 @@ def run_autocorrect(
 
     # Evaluate (graceful degradation)
     eval_results = None
+    _print_phase_status("evaluate", "Sending to Gemini...")
     try:
         eval_results = run_evaluation(output_dir=baseline_dir)
     except Exception as e:
@@ -624,6 +819,7 @@ def run_autocorrect(
         print(f"\n{'=' * 60}")
         print(f"[autocorrect] Iteration {iteration_index}/{max_iterations - 1} "
               f"(stale: {stale_count}/{patience})")
+        print(_format_progress_bar(iteration_index, max_iterations - 1))
         print(f"{'=' * 60}")
 
         # --- Stopping conditions (checked BEFORE each iteration) ---
@@ -640,6 +836,7 @@ def run_autocorrect(
             break
 
         # --- Step 1: Diagnose the best iteration ---
+        _print_phase_status("diagnose", "Calling Claude...")
         hypothesis_data = _run_diagnosis_safe(best_iter)
         if hypothesis_data is None:
             stale_count += 1
@@ -673,6 +870,7 @@ def run_autocorrect(
         save_config(new_cfg)
 
         # --- Step 3: Classify ---
+        _print_phase_status("classify", "Training classifier...")
         try:
             run_classification()
         except Exception as e:
@@ -701,6 +899,7 @@ def run_autocorrect(
 
         # --- Step 6: Evaluate ---
         eval_results = None
+        _print_phase_status("evaluate", "Sending to Gemini...")
         try:
             eval_results = run_evaluation(output_dir=current_dir)
         except Exception as e:
@@ -716,6 +915,7 @@ def run_autocorrect(
               f"(best: {best_score.overall_score:.2f})")
 
         # --- Step 8: Accept/Revert ---
+        prev_best_overall = best_score.overall_score  # capture for summary box
         accepted, reason = _check_pareto_acceptance(best_score, current_score)
 
         if accepted:
@@ -744,6 +944,17 @@ def run_autocorrect(
             "config_changes": hypothesis_data.get("parameter_changes", {}),
             "reason": reason,
         })
+
+        # Print iteration summary box
+        _print_iteration_box(
+            iteration_index=iteration_index,
+            max_iterations=max_iterations,
+            hypothesis=hypothesis_data.get("hypothesis", ""),
+            prev_score=prev_best_overall,
+            new_score=current_score.overall_score,
+            accepted=accepted,
+            class_scores=current_score.class_scores,
+        )
 
     # === FINALIZATION ===
     print(f"\n{'=' * 60}")

@@ -20,7 +20,11 @@ from src.autocorrect import (
     _build_summary,
     _check_pareto_acceptance,
     _extract_score,
+    _format_progress_bar,
     _get_latest_iteration,
+    _print_final_table,
+    _print_iteration_box,
+    _print_phase_status,
     _print_summary,
     _restore_best_outputs,
     _run_diagnosis_safe,
@@ -492,6 +496,261 @@ class TestRestoreBestOutputs:
 
 
 # ---------------------------------------------------------------------------
+# Progress Display Tests
+# ---------------------------------------------------------------------------
+
+class TestFormatProgressBar:
+    """Tests for _format_progress_bar."""
+
+    def test_zero_of_five(self):
+        """Baseline iteration shows 0% progress."""
+        result = _format_progress_bar(0, 5)
+        assert "[0/5]" in result
+        assert "0%" in result
+        assert "░" in result
+
+    def test_middle_progress(self):
+        """Mid-loop shows partial bar with both filled and empty."""
+        result = _format_progress_bar(2, 5)
+        assert "[2/5]" in result
+        assert "40%" in result
+        assert "█" in result
+        assert "░" in result
+
+    def test_complete(self):
+        """Final iteration shows 100% with all filled blocks."""
+        result = _format_progress_bar(5, 5)
+        assert "[5/5]" in result
+        assert "100%" in result
+        assert "░" not in result
+
+    def test_total_zero_no_crash(self):
+        """total=0 does not raise; shows 0%."""
+        result = _format_progress_bar(0, 0)
+        assert "0%" in result
+
+    def test_current_exceeds_total(self):
+        """current > total clamps to 100%."""
+        result = _format_progress_bar(6, 5)
+        assert "100%" in result
+
+
+class TestPrintPhaseStatus:
+    """Tests for _print_phase_status."""
+
+    def test_format(self, capsys):
+        """Phase status uses [module] prefix."""
+        _print_phase_status("classify", "Training...")
+        output = capsys.readouterr().out
+        assert "[classify] Training..." in output
+
+    def test_evaluate_format(self, capsys):
+        """Evaluate phase uses [evaluate] prefix."""
+        _print_phase_status("evaluate", "Sending to Gemini...")
+        output = capsys.readouterr().out
+        assert "[evaluate] Sending to Gemini..." in output
+
+    def test_no_ansi_escapes(self, capsys):
+        """Phase status output contains no ANSI escape sequences."""
+        _print_phase_status("diagnose", "Calling Claude...")
+        output = capsys.readouterr().out
+        assert "\033" not in output
+
+
+class TestPrintIterationBox:
+    """Tests for _print_iteration_box."""
+
+    def test_accepted_iteration(self, capsys):
+        """Accepted iteration box contains key information and no ANSI escapes."""
+        _print_iteration_box(
+            iteration_index=2,
+            max_iterations=6,
+            hypothesis="Add NDVI features",
+            prev_score=6.0,
+            new_score=7.2,
+            accepted=True,
+            class_scores={"Other": 9.4, "Cropland": 8.4, "Water": 4.8},
+        )
+        output = capsys.readouterr().out
+        assert "Iteration 2/5" in output
+        assert "Add NDVI features" in output
+        assert "ACCEPTED" in output
+        assert "6.0" in output
+        assert "7.2" in output
+        assert "┌" in output
+        assert "└" in output
+        assert "\033" not in output  # No ANSI escapes
+
+    def test_reverted_iteration(self, capsys):
+        """Reverted iteration shows REVERTED."""
+        _print_iteration_box(
+            iteration_index=1,
+            max_iterations=4,
+            hypothesis="Bad change",
+            prev_score=7.0,
+            new_score=6.5,
+            accepted=False,
+            class_scores={},
+        )
+        output = capsys.readouterr().out
+        assert "REVERTED" in output
+        assert "✗" in output
+
+    def test_none_hypothesis_shows_baseline(self, capsys):
+        """None hypothesis shows (Baseline)."""
+        _print_iteration_box(
+            iteration_index=1,
+            max_iterations=5,
+            hypothesis=None,
+            prev_score=7.0,
+            new_score=7.5,
+            accepted=True,
+            class_scores={},
+        )
+        output = capsys.readouterr().out
+        assert "(Baseline)" in output
+
+    def test_empty_class_scores_omits_best_worst(self, capsys):
+        """Empty class_scores omits best/worst lines."""
+        _print_iteration_box(
+            iteration_index=1,
+            max_iterations=3,
+            hypothesis="Test",
+            prev_score=7.0,
+            new_score=7.5,
+            accepted=True,
+            class_scores={},
+        )
+        output = capsys.readouterr().out
+        assert "Best" not in output
+        assert "Worst" not in output
+
+    def test_long_hypothesis_truncated(self, capsys):
+        """Hypothesis longer than box width is truncated with ellipsis."""
+        long_hyp = "A" * 200
+        _print_iteration_box(
+            iteration_index=1,
+            max_iterations=3,
+            hypothesis=long_hyp,
+            prev_score=7.0,
+            new_score=7.5,
+            accepted=True,
+            class_scores={},
+        )
+        output = capsys.readouterr().out
+        assert "..." in output
+
+    def test_best_worst_ordering(self, capsys):
+        """Best classes are sorted by score descending; worst is lowest."""
+        _print_iteration_box(
+            iteration_index=1,
+            max_iterations=3,
+            hypothesis="Test ordering",
+            prev_score=7.0,
+            new_score=7.5,
+            accepted=True,
+            class_scores={
+                "Water": 4.0,
+                "Tree cover": 6.0,
+                "Other": 9.0,
+                "Cropland": 8.0,
+                "Built-up": 7.0,
+                "Grassland": 5.0,
+            },
+        )
+        output = capsys.readouterr().out
+        # Best classes should be Other (9.0) and Cropland (8.0) in that order
+        assert "Other (9.0)" in output
+        assert "Cropland (8.0)" in output
+        # "Other" should appear before "Cropland" in the best line
+        best_line = [l for l in output.split("\n") if "Best classes" in l][0]
+        assert best_line.index("Other") < best_line.index("Cropland")
+        # Worst should be Water (4.0)
+        assert "Water (4.0)" in output
+
+    def test_score_delta_shown(self, capsys):
+        """Score delta is shown in the box."""
+        _print_iteration_box(
+            iteration_index=1,
+            max_iterations=3,
+            hypothesis="Test",
+            prev_score=6.0,
+            new_score=7.2,
+            accepted=True,
+            class_scores={},
+        )
+        output = capsys.readouterr().out
+        assert "+1.2" in output
+
+
+class TestPrintFinalTable:
+    """Tests for _print_final_table."""
+
+    def test_with_history(self, capsys):
+        """Table shows all iterations with correct data."""
+        history = [
+            {"iteration": 1, "score": 7.52, "status": "accepted",
+             "hypothesis": None, "config_changes": None, "reason": "Baseline"},
+            {"iteration": 2, "score": 7.80, "status": "accepted",
+             "hypothesis": "Add NDVI", "config_changes": {}, "reason": "Improved"},
+            {"iteration": 3, "score": 7.60, "status": "reverted",
+             "hypothesis": "Increase trees", "config_changes": {}, "reason": "Worse"},
+        ]
+        _print_final_table(history)
+        output = capsys.readouterr().out
+        assert "001" in output
+        assert "7.52" in output
+        assert "7.80" in output
+        assert "Add NDVI" in output
+        assert "(Baseline)" in output
+        assert "┌" in output
+        assert "└" in output
+        assert "Iteration Summary" in output
+
+    def test_empty_history(self, capsys):
+        """Empty history shows no-iterations message."""
+        _print_final_table([])
+        output = capsys.readouterr().out
+        assert "no iterations" in output.lower()
+
+    def test_skipped_entry(self, capsys):
+        """Skipped entries show N/A for iteration and score."""
+        history = [
+            {"iteration": 1, "score": 7.52, "status": "accepted",
+             "hypothesis": None, "config_changes": None, "reason": "Baseline"},
+            {"iteration": None, "score": None, "status": "skipped",
+             "hypothesis": None, "config_changes": None, "reason": "Diagnosis failed"},
+        ]
+        _print_final_table(history)
+        output = capsys.readouterr().out
+        assert "N/A" in output
+        assert "skipped" in output
+
+    def test_delta_computation(self, capsys):
+        """Delta shows -- for first entry and computed value for subsequent."""
+        history = [
+            {"iteration": 1, "score": 7.00, "status": "accepted",
+             "hypothesis": None, "config_changes": None, "reason": "Baseline"},
+            {"iteration": 2, "score": 7.50, "status": "accepted",
+             "hypothesis": "Improve", "config_changes": {}, "reason": "Better"},
+        ]
+        _print_final_table(history)
+        output = capsys.readouterr().out
+        assert "--" in output  # First entry delta
+        assert "+0.50" in output  # Second entry delta
+
+    def test_long_hypothesis_truncated(self, capsys):
+        """Long hypothesis text is truncated in the table."""
+        history = [
+            {"iteration": 1, "score": 7.00, "status": "accepted",
+             "hypothesis": "A" * 100, "config_changes": {}, "reason": "Test"},
+        ]
+        _print_final_table(history)
+        output = capsys.readouterr().out
+        assert "..." in output
+
+
+# ---------------------------------------------------------------------------
 # Summary Generation Tests
 # ---------------------------------------------------------------------------
 
@@ -540,6 +799,7 @@ class TestSummary:
         assert "Self-Correction Complete" in captured
         assert "7.52" in captured
         assert "7.80" in captured
+        assert "Iteration Summary" in captured
 
     def test_save_summary_md(self, mocker, tmp_path):
         """SUMMARY.md written with iteration table."""
@@ -712,6 +972,19 @@ class TestRunAutocorrect:
         run_autocorrect(max_iterations=1, target_score=10.0, patience=3)
         for year in config.TIME_RANGES:
             assert (mock_pipeline["tmp_path"] / "output" / f"landcover_{year}.tif").exists()
+
+    def test_progress_output_present(self, mock_pipeline, capsys):
+        """Progress bar, phase status, and iteration table appear in loop output."""
+        result = run_autocorrect(max_iterations=2, target_score=10.0, patience=3)
+        output = capsys.readouterr().out
+        # Phase status lines
+        assert "[classify]" in output
+        # Iteration table in final summary
+        assert "Iteration Summary" in output
+        assert "┌" in output
+        assert "└" in output
+        # No ANSI escapes anywhere
+        assert "\033" not in output
 
     def test_improvement_accepted(self, mock_pipeline, mocker):
         """When hypothesis improves score, iteration is accepted."""
