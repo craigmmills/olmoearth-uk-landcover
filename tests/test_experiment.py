@@ -170,6 +170,163 @@ class TestValidateConfig:
 
 
 # ---------------------------------------------------------------------------
+# Classifier Selection Validation Tests
+# ---------------------------------------------------------------------------
+
+
+class TestValidateClassifierSelection:
+    """Tests for multi-classifier validation in validate_config."""
+
+    @pytest.mark.parametrize("classifier", [
+        "RandomForest", "GradientBoosting", "SVM",
+        "LogisticRegression", "KNN", "MLP",
+    ])
+    def test_all_valid_classifiers_accepted(self, default_config, classifier):
+        """All 6 classifier types pass validation."""
+        default_config["training"]["classifier"] = classifier
+        validate_config(default_config)  # should not raise
+
+    def test_invalid_classifier_rejected(self, default_config):
+        """Unknown classifier name raises ValueError."""
+        default_config["training"]["classifier"] = "XGBoost"
+        with pytest.raises(ValueError, match="training.classifier"):
+            validate_config(default_config)
+
+    def test_gb_learning_rate_validated(self, default_config):
+        """GradientBoosting with invalid learning_rate raises ValueError."""
+        default_config["training"]["classifier"] = "GradientBoosting"
+        default_config["training"]["learning_rate"] = 0
+        with pytest.raises(ValueError, match="learning_rate"):
+            validate_config(default_config)
+
+    def test_svm_kernel_validated(self, default_config):
+        """SVM with invalid kernel raises ValueError."""
+        default_config["training"]["classifier"] = "SVM"
+        default_config["training"]["kernel"] = "quantum"
+        with pytest.raises(ValueError, match="kernel"):
+            validate_config(default_config)
+
+    def test_svm_gamma_validated(self, default_config):
+        """SVM with invalid gamma raises ValueError."""
+        default_config["training"]["classifier"] = "SVM"
+        default_config["training"]["gamma"] = "invalid"
+        with pytest.raises(ValueError, match="gamma"):
+            validate_config(default_config)
+
+    def test_svm_gamma_float_accepted(self, default_config):
+        """SVM with float gamma > 0 is accepted."""
+        default_config["training"]["classifier"] = "SVM"
+        default_config["training"]["gamma"] = 0.5
+        validate_config(default_config)  # should not raise
+
+    def test_lr_c_validated(self, default_config):
+        """LogisticRegression with C <= 0 raises ValueError."""
+        default_config["training"]["classifier"] = "LogisticRegression"
+        default_config["training"]["C"] = -1.0
+        with pytest.raises(ValueError, match="training.C"):
+            validate_config(default_config)
+
+    def test_knn_n_neighbors_validated(self, default_config):
+        """KNN with invalid n_neighbors raises ValueError."""
+        default_config["training"]["classifier"] = "KNN"
+        default_config["training"]["n_neighbors"] = 0
+        with pytest.raises(ValueError, match="n_neighbors"):
+            validate_config(default_config)
+
+    def test_knn_weights_validated(self, default_config):
+        """KNN with invalid weights raises ValueError."""
+        default_config["training"]["classifier"] = "KNN"
+        default_config["training"]["weights"] = "cosine"
+        with pytest.raises(ValueError, match="weights"):
+            validate_config(default_config)
+
+    def test_mlp_hidden_layer_sizes_validated(self, default_config):
+        """MLP with empty hidden_layer_sizes raises ValueError."""
+        default_config["training"]["classifier"] = "MLP"
+        default_config["training"]["hidden_layer_sizes"] = []
+        with pytest.raises(ValueError, match="hidden_layer_sizes"):
+            validate_config(default_config)
+
+    def test_mlp_alpha_validated(self, default_config):
+        """MLP with negative alpha raises ValueError."""
+        default_config["training"]["classifier"] = "MLP"
+        default_config["training"]["alpha"] = -0.01
+        with pytest.raises(ValueError, match="alpha"):
+            validate_config(default_config)
+
+    def test_max_iter_validated_for_mlp(self, default_config):
+        """MLP with max_iter out of range raises ValueError."""
+        default_config["training"]["classifier"] = "MLP"
+        default_config["training"]["max_iter"] = 50
+        with pytest.raises(ValueError, match="max_iter"):
+            validate_config(default_config)
+
+    def test_class_weight_only_validated_for_supported_classifiers(self, default_config):
+        """class_weight is NOT validated for GradientBoosting (silently ignored)."""
+        default_config["training"]["classifier"] = "GradientBoosting"
+        default_config["training"]["class_weight"] = "invalid_value"
+        default_config["training"]["max_depth"] = 3
+        # Should not raise -- class_weight is ignored for GB
+        validate_config(default_config)
+
+    def test_n_estimators_only_validated_for_tree_classifiers(self, default_config):
+        """n_estimators is NOT validated for SVM."""
+        default_config["training"]["classifier"] = "SVM"
+        default_config["training"]["n_estimators"] = 99999  # invalid range
+        # Should not raise -- n_estimators is ignored for SVM
+        validate_config(default_config)
+
+
+# ---------------------------------------------------------------------------
+# Preprocessing Validation Tests
+# ---------------------------------------------------------------------------
+
+
+class TestValidatePreprocessing:
+    """Tests for preprocessing parameter validation."""
+
+    def test_pca_zero_accepted(self, default_config):
+        """pca_components=0 (disabled) is accepted."""
+        default_config["training"]["pca_components"] = 0
+        validate_config(default_config)  # should not raise
+
+    def test_pca_valid_range_accepted(self, default_config):
+        """pca_components in 2-500 accepted."""
+        default_config["training"]["pca_components"] = 100
+        validate_config(default_config)  # should not raise
+
+    def test_pca_one_rejected(self, default_config):
+        """pca_components=1 rejected (below minimum 2)."""
+        default_config["training"]["pca_components"] = 1
+        with pytest.raises(ValueError, match="pca_components"):
+            validate_config(default_config)
+
+    def test_pca_too_large_rejected(self, default_config):
+        """pca_components > 500 rejected."""
+        default_config["training"]["pca_components"] = 501
+        with pytest.raises(ValueError, match="pca_components"):
+            validate_config(default_config)
+
+    def test_pca_negative_rejected(self, default_config):
+        """Negative pca_components rejected."""
+        default_config["training"]["pca_components"] = -1
+        with pytest.raises(ValueError, match="pca_components"):
+            validate_config(default_config)
+
+    def test_scale_features_bool_required(self, default_config):
+        """Non-bool scale_features rejected."""
+        default_config["training"]["scale_features"] = 1
+        with pytest.raises(ValueError, match="scale_features"):
+            validate_config(default_config)
+
+    def test_l2_normalize_bool_required(self, default_config):
+        """Non-bool l2_normalize rejected."""
+        default_config["training"]["l2_normalize"] = "yes"
+        with pytest.raises(ValueError, match="l2_normalize"):
+            validate_config(default_config)
+
+
+# ---------------------------------------------------------------------------
 # Prerequisite Validation Tests
 # ---------------------------------------------------------------------------
 

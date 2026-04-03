@@ -92,7 +92,6 @@ class Hypothesis(BaseModel):
 
 # Tier parameter membership
 # NOTE: Keep in sync with src/experiment.py validate_config() constraints.
-# "classifier swap" (requirements Tier 2) not representable -- only RandomForest in config.
 # "embedding changes" (requirements Tier 3) not representable -- no embedding model config param.
 TIER_PARAMS: dict[int, set[str]] = {
     1: {
@@ -100,12 +99,25 @@ TIER_PARAMS: dict[int, set[str]] = {
         "training.exclude_boundary_pixels",
         "training.boundary_buffer_px",
         "training.class_weight",
-        "training.max_depth",           # Moved from Tier 2 (RT3-C3, RT4-C1)
+        "training.max_depth",
         "post_processing.mode_filter_size",
         "post_processing.min_mapping_unit_px",
     },
     2: {
         "training.n_estimators",
+        "training.classifier",
+        "training.pca_components",
+        "training.scale_features",
+        "training.l2_normalize",
+        "training.learning_rate",
+        "training.C",
+        "training.kernel",
+        "training.gamma",
+        "training.max_iter",
+        "training.n_neighbors",
+        "training.weights",
+        "training.hidden_layer_sizes",
+        "training.alpha",
         "features.add_ndvi",
         "features.add_ndwi",
     },
@@ -299,11 +311,33 @@ def _build_diagnosis_prompt(
         "   - features.add_ndwi: bool\n"
         "   - post_processing.mode_filter_size: 0 (disabled) or odd int >= 3, < 512\n"
         "   - post_processing.min_mapping_unit_px: int >= 0\n"
+        "   - training.classifier: 'RandomForest', 'GradientBoosting', 'SVM', "
+        "'LogisticRegression', 'KNN', or 'MLP'\n"
+        "   - training.pca_components: int >= 0 (0=disabled, typical range 50-150)\n"
+        "   - training.scale_features: bool\n"
+        "   - training.l2_normalize: bool\n"
+        "   - training.learning_rate: float 0.001-1.0 (GradientBoosting only)\n"
+        "   - training.C: float > 0 (SVM, LogisticRegression)\n"
+        "   - training.kernel: 'rbf', 'linear', 'poly', 'sigmoid' (SVM only)\n"
+        "   - training.gamma: 'scale', 'auto', or float > 0 (SVM only)\n"
+        "   - training.max_iter: int 100-10000 (LogisticRegression, MLP)\n"
+        "   - training.n_neighbors: int 1-100 (KNN only)\n"
+        "   - training.weights: 'uniform', 'distance' (KNN only)\n"
+        "   - training.hidden_layer_sizes: list of ints (MLP only)\n"
+        "   - training.alpha: float >= 0 (MLP only)\n"
         "4. Tier escalation: Stay within the specified tier unless all its options are exhausted\n"
         "5. Do NOT propose changes that repeat a reverted experiment\n"
         "6. If you identify a class taxonomy issue (e.g., classes should be merged), "
         "express this through the 'reasoning' field of a 'training' component hypothesis "
-        "that addresses the symptom via available parameters\n\n"
+        "that addresses the symptom via available parameters\n"
+        "7. When swapping classifiers, also set appropriate hyperparameters for the new "
+        "classifier type. Only set hyperparameters relevant to the chosen classifier. "
+        "Defaults exist for all classifiers; you may omit params to accept defaults.\n"
+        "8. Preprocessing order is fixed: L2 normalize -> StandardScaler -> PCA -> classifier.\n"
+        "9. GradientBoosting, KNN, and MLP do not support class_weight. For imbalanced data, "
+        "prefer RandomForest, SVM, or LogisticRegression.\n"
+        "10. When switching to GradientBoosting, set max_depth to 3-5. "
+        "The default max_depth=20 (from RandomForest) is too deep for GB.\n\n"
         "OUTPUT FORMAT (strict JSON, no markdown wrapping):\n"
         "{\n"
         '  "hypothesis": "Natural language WHY this change should help",\n'
@@ -362,12 +396,18 @@ def _build_diagnosis_prompt(
 
     # Section 6: Tier constraint
     tier_desc = {
-        1: "Tier 1 (safe): training.max_samples_per_class, training.exclude_boundary_pixels, "
-           "training.boundary_buffer_px, training.class_weight, training.max_depth, "
+        1: "Tier 1 (safe): training.max_samples_per_class, "
+           "training.exclude_boundary_pixels, training.boundary_buffer_px, "
+           "training.class_weight, training.max_depth, "
            "post_processing.mode_filter_size, post_processing.min_mapping_unit_px",
-        2: "Tier 2 (moderate): training.n_estimators, "
+        2: "Tier 2 (moderate): training.classifier, training.pca_components, "
+           "training.scale_features, training.l2_normalize, training.n_estimators, "
+           "training.learning_rate, training.C, training.kernel, training.gamma, "
+           "training.max_iter, training.n_neighbors, training.weights, "
+           "training.hidden_layer_sizes, training.alpha, "
            "features.add_ndvi, features.add_ndwi",
-        3: "Tier 3 (aggressive): features.add_spatial_context (warning: not yet implemented), "
+        3: "Tier 3 (aggressive): features.add_spatial_context "
+           "(warning: not yet implemented), "
            "combinations of parameters from lower tiers",
     }
     sections.append(
@@ -741,6 +781,50 @@ def _rule_based_diagnosis(
             tier=2,
             confidence=0.5,
             reasoning="Rule-based: NDWI not enabled.",
+        )
+
+    # Rule 9 (Tier 2): Try GradientBoosting if RF hasn't improved
+    if tier <= 2 and training.get("classifier") == "RandomForest":
+        return Hypothesis(
+            hypothesis="RandomForest may not capture complex interactions in "
+                       "embeddings. GradientBoosting builds trees sequentially "
+                       "to correct errors.",
+            component="training",
+            parameter_changes={
+                "training.classifier": "GradientBoosting",
+                "training.learning_rate": 0.1,
+                "training.max_depth": 3,
+            },
+            expected_impact="Better handling of complex class boundaries",
+            risk="Slower training, no parallelization (n_jobs not supported). "
+                 "Does not support class_weight for imbalanced data.",
+            tier=2,
+            confidence=0.6,
+            reasoning="Rule-based: Tier 2 classifier swap. GB often outperforms "
+                      "RF on high-dimensional embeddings.",
+        )
+
+    # Rule 10 (Tier 2): Try preprocessing (scale + PCA)
+    if (tier <= 2
+            and not training.get("scale_features")
+            and not training.get("pca_components", 0)):
+        return Hypothesis(
+            hypothesis="OlmoEarth embeddings (192-dim) may benefit from "
+                       "dimensionality reduction. StandardScaler + PCA can "
+                       "remove noise dimensions.",
+            component="training",
+            parameter_changes={
+                "training.scale_features": True,
+                "training.pca_components": 100,
+            },
+            expected_impact="Faster training, reduced noise from redundant "
+                            "dimensions",
+            risk="May lose discriminative information if too many components "
+                 "removed",
+            tier=2,
+            confidence=0.55,
+            reasoning="Rule-based: Tier 2 preprocessing. 192-dim embeddings "
+                      "-> 100 PCA components.",
         )
 
     # Exhausted: increase max_depth (with cap check)

@@ -307,13 +307,117 @@ def _compute_metrics(predictions, labels) -> dict:
     return metrics
 
 
+def _build_classifier(training: dict):
+    """Build an unfitted sklearn classifier from config.
+
+    Returns the estimator instance ready for .fit().
+    The class_weight "none" -> None mapping is already done by validate_config().
+    """
+    from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
+    from sklearn.svm import SVC
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.neighbors import KNeighborsClassifier
+    from sklearn.neural_network import MLPClassifier
+
+    classifier = training["classifier"]
+    class_weight = training.get("class_weight")
+    random_state = training.get("random_state", 42)
+
+    if classifier == "RandomForest":
+        return RandomForestClassifier(
+            n_estimators=training["n_estimators"],
+            max_depth=training["max_depth"],
+            n_jobs=-1,
+            random_state=random_state,
+            class_weight=class_weight,
+        )
+    elif classifier == "GradientBoosting":
+        if training.get("max_depth", 20) > 10:
+            print(
+                f"[classify] WARNING: GradientBoosting with max_depth="
+                f"{training['max_depth']} may be slow and overfit. "
+                f"Typical range is 3-5."
+            )
+        return GradientBoostingClassifier(
+            n_estimators=training["n_estimators"],
+            max_depth=training["max_depth"],
+            learning_rate=training["learning_rate"],
+            random_state=random_state,
+        )
+    elif classifier == "SVM":
+        return SVC(
+            C=training["C"],
+            kernel=training["kernel"],
+            gamma=training["gamma"],
+            random_state=random_state,
+            class_weight=class_weight,
+        )
+    elif classifier == "LogisticRegression":
+        return LogisticRegression(
+            C=training["C"],
+            max_iter=training["max_iter"],
+            random_state=random_state,
+            class_weight=class_weight,
+        )
+    elif classifier == "KNN":
+        return KNeighborsClassifier(
+            n_neighbors=training["n_neighbors"],
+            weights=training["weights"],
+            n_jobs=-1,
+        )
+    elif classifier == "MLP":
+        return MLPClassifier(
+            hidden_layer_sizes=tuple(training["hidden_layer_sizes"]),
+            max_iter=training["max_iter"],
+            alpha=training["alpha"],
+            random_state=random_state,
+        )
+    else:
+        raise ValueError(f"Unknown classifier: {classifier!r}")
+
+
+def _build_preprocessing_steps(training: dict):
+    """Build preprocessing pipeline steps from config.
+
+    Order: L2 normalize -> StandardScaler -> PCA (per spec).
+    Returns list of (name, transformer) tuples. Empty list if no preprocessing.
+    """
+    from sklearn.preprocessing import FunctionTransformer, StandardScaler
+    from sklearn.decomposition import PCA
+    import numpy as np
+
+    steps = []
+
+    if training.get("l2_normalize", False):
+        def _l2_normalize(X):
+            norms = np.linalg.norm(X, axis=1, keepdims=True)
+            return X / (norms + 1e-10)
+
+        steps.append(("l2_normalize", FunctionTransformer(
+            func=_l2_normalize,
+            validate=True,
+        )))
+
+    if training.get("scale_features", False):
+        steps.append(("scaler", StandardScaler()))
+
+    pca_components = training.get("pca_components", 0)
+    if pca_components > 0:
+        steps.append(("pca", PCA(
+            n_components=pca_components,
+            random_state=training.get("random_state", 42),
+        )))
+
+    return steps
+
+
 def train_classifier(embeddings, labels, cfg=None):
-    """Train a RandomForest classifier on embeddings + WorldCover labels.
+    """Train a classifier on embeddings + WorldCover labels.
 
     Returns (clf, training_accuracy, n_training_samples).
     """
     import numpy as np
-    from sklearn.ensemble import RandomForestClassifier
+    from sklearn.pipeline import Pipeline
 
     if cfg is None:
         from src.experiment import load_config
@@ -359,23 +463,49 @@ def train_classifier(embeddings, labels, cfg=None):
     X_train = X[sample_indices]
     y_train = y[sample_indices]
 
-    # Map class_weight: "none" -> None for sklearn
-    class_weight = training["class_weight"]
-    if class_weight == "none":
-        class_weight = None
+    # Build preprocessing + classifier pipeline
+    preprocess_steps = _build_preprocessing_steps(training)
+    estimator = _build_classifier(training)
 
-    print(f"[classify] Training RandomForest on {len(X_train):,} samples "
-          f"({len(config.LANDCOVER_CLASSES)} classes), "
-          f"n_estimators={training['n_estimators']}, max_depth={training['max_depth']}")
+    # Guard: PCA components must not exceed feature dimensions
+    pca_components = training.get("pca_components", 0)
+    if pca_components > 0 and pca_components >= d:
+        print(f"[classify] WARNING: pca_components={pca_components} >= feature dim "
+              f"{d}, disabling PCA")
+        preprocess_steps = [s for s in preprocess_steps if s[0] != "pca"]
 
-    clf = RandomForestClassifier(
-        n_estimators=training["n_estimators"],
-        max_depth=training["max_depth"],
-        n_jobs=-1,
-        random_state=training["random_state"],
-        class_weight=class_weight,
-    )
-    clf.fit(X_train, y_train)
+    if preprocess_steps:
+        pipeline_steps = preprocess_steps + [("classifier", estimator)]
+        clf = Pipeline(pipeline_steps)
+    else:
+        clf = estimator  # No preprocessing -- bare estimator (backward compat)
+
+    classifier_name = training["classifier"]
+
+    # SVM warning for large datasets
+    if classifier_name == "SVM" and len(X_train) > 50000:
+        print(f"[classify] WARNING: SVM with {len(X_train):,} samples may be "
+              f"very slow (O(n^2)). Consider reducing max_samples_per_class.")
+
+    print(f"[classify] Training {classifier_name} on {len(X_train):,} samples "
+          f"({len(config.LANDCOVER_CLASSES)} classes)")
+
+    try:
+        clf.fit(X_train, y_train)
+    except ValueError as e:
+        raise ValueError(
+            f"Classifier training failed: {e}. "
+            f"Try adjusting preprocessing config (pca_components, scale_features) "
+            f"or classifier hyperparameters."
+        ) from e
+
+    # MLP convergence check
+    if classifier_name == "MLP":
+        inner = clf.named_steps["classifier"] if hasattr(clf, "named_steps") else clf
+        if hasattr(inner, "n_iter_") and inner.n_iter_ == inner.max_iter:
+            print(f"[classify] WARNING: MLP did not converge within "
+                  f"max_iter={inner.max_iter} iterations. "
+                  f"Consider increasing training.max_iter.")
 
     train_acc = clf.score(X_train, y_train)
     print(f"[classify] Training accuracy: {train_acc:.3f}")

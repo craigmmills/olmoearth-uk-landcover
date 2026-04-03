@@ -17,9 +17,30 @@ DEFAULT_CONFIG: dict = {
         "exclude_boundary_pixels": False,
         "boundary_buffer_px": 0,
         "classifier": "RandomForest",
+        # Preprocessing (applied in order: L2 norm -> scale -> PCA)
+        "pca_components": 0,        # 0 = disabled; valid range 2-500 when enabled
+        "scale_features": False,
+        "l2_normalize": False,
+        # RandomForest / GradientBoosting shared
         "n_estimators": 100,
         "max_depth": 20,
+        # RandomForest / SVM / LogisticRegression
         "class_weight": "balanced",
+        # GradientBoosting
+        "learning_rate": 0.1,
+        # SVM
+        "C": 1.0,
+        "kernel": "rbf",
+        "gamma": "scale",
+        # LogisticRegression / MLP shared
+        "max_iter": 1000,
+        # KNN
+        "n_neighbors": 5,
+        "weights": "uniform",
+        # MLP
+        "hidden_layer_sizes": [100],
+        "alpha": 0.0001,
+        # Shared
         "random_state": 42,
     },
     "features": {
@@ -108,34 +129,149 @@ def save_config(cfg: dict, config_path: Path | None = None) -> None:
     tmp_path.rename(config_path)
 
 
+VALID_CLASSIFIERS: set[str] = {
+    "RandomForest", "GradientBoosting", "SVM",
+    "LogisticRegression", "KNN", "MLP",
+}
+
+
+def _validate_classifier_params(classifier: str, training: dict) -> None:
+    """Validate hyperparameters specific to the active classifier.
+
+    Only validates params relevant to the given classifier type.
+    Params for other classifiers are silently preserved.
+    """
+    if classifier in ("RandomForest", "GradientBoosting"):
+        n_est = training.get("n_estimators")
+        if not isinstance(n_est, int) or n_est < 1 or n_est > 1000:
+            raise ValueError(
+                f"training.n_estimators must be int between 1 and 1000, got {n_est!r}"
+            )
+        max_depth = training.get("max_depth")
+        if max_depth is not None:
+            if not isinstance(max_depth, int) or max_depth < 1 or max_depth > 100:
+                raise ValueError(
+                    f"training.max_depth must be int between 1 and 100, or null, "
+                    f"got {max_depth!r}"
+                )
+
+    if classifier in ("RandomForest", "SVM", "LogisticRegression"):
+        class_weight = training.get("class_weight")
+        if class_weight == "none":
+            training["class_weight"] = None
+        elif class_weight not in ("balanced", "balanced_subsample", None):
+            raise ValueError(
+                f"training.class_weight must be 'balanced', 'balanced_subsample', "
+                f"'none', or null, got {class_weight!r}"
+            )
+
+    if classifier == "GradientBoosting":
+        lr = training.get("learning_rate")
+        if not isinstance(lr, (int, float)) or lr <= 0 or lr > 1.0:
+            raise ValueError(
+                f"training.learning_rate must be float in (0, 1.0], got {lr!r}"
+            )
+
+    if classifier in ("SVM", "LogisticRegression"):
+        c_val = training.get("C")
+        if not isinstance(c_val, (int, float)) or c_val <= 0:
+            raise ValueError(
+                f"training.C must be float > 0, got {c_val!r}"
+            )
+
+    if classifier == "SVM":
+        kernel = training.get("kernel")
+        if kernel not in ("rbf", "linear", "poly", "sigmoid"):
+            raise ValueError(
+                f"training.kernel must be 'rbf', 'linear', 'poly', or 'sigmoid', "
+                f"got {kernel!r}"
+            )
+        gamma = training.get("gamma")
+        if gamma not in ("scale", "auto"):
+            if not isinstance(gamma, (int, float)) or gamma <= 0:
+                raise ValueError(
+                    f"training.gamma must be 'scale', 'auto', or float > 0, "
+                    f"got {gamma!r}"
+                )
+
+    if classifier in ("LogisticRegression", "MLP"):
+        max_iter = training.get("max_iter")
+        if not isinstance(max_iter, int) or max_iter < 100 or max_iter > 10000:
+            raise ValueError(
+                f"training.max_iter must be int between 100 and 10000, got {max_iter!r}"
+            )
+
+    if classifier == "KNN":
+        n_neighbors = training.get("n_neighbors")
+        if not isinstance(n_neighbors, int) or n_neighbors < 1 or n_neighbors > 100:
+            raise ValueError(
+                f"training.n_neighbors must be int between 1 and 100, "
+                f"got {n_neighbors!r}"
+            )
+        weights = training.get("weights")
+        if weights not in ("uniform", "distance"):
+            raise ValueError(
+                f"training.weights must be 'uniform' or 'distance', got {weights!r}"
+            )
+
+    if classifier == "MLP":
+        hidden = training.get("hidden_layer_sizes")
+        if not isinstance(hidden, list) or len(hidden) == 0:
+            raise ValueError(
+                f"training.hidden_layer_sizes must be a non-empty list of positive "
+                f"ints, got {hidden!r}"
+            )
+        if not all(isinstance(x, int) and x > 0 for x in hidden):
+            raise ValueError(
+                f"training.hidden_layer_sizes must contain only positive ints, "
+                f"got {hidden!r}"
+            )
+        alpha = training.get("alpha")
+        if not isinstance(alpha, (int, float)) or alpha < 0:
+            raise ValueError(
+                f"training.alpha must be float >= 0, got {alpha!r}"
+            )
+
+
+def _validate_preprocessing_params(training: dict) -> None:
+    """Validate preprocessing configuration flags."""
+    pca = training.get("pca_components")
+    if not isinstance(pca, int) or pca < 0:
+        raise ValueError(
+            f"training.pca_components must be non-negative int (0=disabled), "
+            f"got {pca!r}"
+        )
+    if pca > 0 and (pca < 2 or pca > 500):
+        raise ValueError(
+            f"training.pca_components must be 0 (disabled) or 2-500, got {pca}"
+        )
+
+    scale = training.get("scale_features")
+    if not isinstance(scale, bool):
+        raise ValueError(f"training.scale_features must be bool, got {scale!r}")
+
+    l2 = training.get("l2_normalize")
+    if not isinstance(l2, bool):
+        raise ValueError(f"training.l2_normalize must be bool, got {l2!r}")
+
+
 def validate_config(cfg: dict) -> None:
     """Validate experiment config values.
 
     Raises ValueError with descriptive messages for invalid values.
-    Maps class_weight "none" to Python None.
+    Maps class_weight "none" to Python None for classifiers that support it.
     """
     training = cfg.get("training", {})
     features = cfg.get("features", {})
     post_processing = cfg.get("post_processing", {})
 
     # --- training section ---
-    if training.get("classifier") != "RandomForest":
+    classifier = training.get("classifier")
+    if classifier not in VALID_CLASSIFIERS:
         raise ValueError(
-            f"training.classifier must be 'RandomForest', got {training.get('classifier')!r}"
+            f"training.classifier must be one of {sorted(VALID_CLASSIFIERS)}, "
+            f"got {classifier!r}"
         )
-
-    n_est = training.get("n_estimators")
-    if not isinstance(n_est, int) or n_est < 1 or n_est > 1000:
-        raise ValueError(
-            f"training.n_estimators must be int between 1 and 1000, got {n_est!r}"
-        )
-
-    max_depth = training.get("max_depth")
-    if max_depth is not None:
-        if not isinstance(max_depth, int) or max_depth < 1 or max_depth > 100:
-            raise ValueError(
-                f"training.max_depth must be int between 1 and 100, or null, got {max_depth!r}"
-            )
 
     max_samples = training.get("max_samples_per_class")
     if not isinstance(max_samples, int) or max_samples < 1 or max_samples > 100000:
@@ -161,20 +297,17 @@ def validate_config(cfg: dict) -> None:
             "training.boundary_buffer_px must be >= 1 when exclude_boundary_pixels is True"
         )
 
-    class_weight = training.get("class_weight")
-    if class_weight == "none":
-        cfg["training"]["class_weight"] = None
-    elif class_weight not in ("balanced", "balanced_subsample", None):
-        raise ValueError(
-            f"training.class_weight must be 'balanced', 'balanced_subsample', 'none', or null, "
-            f"got {class_weight!r}"
-        )
-
     random_state = training.get("random_state")
     if not isinstance(random_state, int) or random_state < 0:
         raise ValueError(
             f"training.random_state must be non-negative int, got {random_state!r}"
         )
+
+    # Per-classifier hyperparameter validation
+    _validate_classifier_params(classifier, training)
+
+    # Preprocessing validation
+    _validate_preprocessing_params(training)
 
     # --- features section ---
     use_emb = features.get("use_embeddings")

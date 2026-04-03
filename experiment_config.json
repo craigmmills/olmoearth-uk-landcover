@@ -4,10 +4,22 @@
     "exclude_boundary_pixels": false,
     "boundary_buffer_px": 0,
     "classifier": "RandomForest",
+    "pca_components": 0,
+    "scale_features": false,
+    "l2_normalize": false,
     "n_estimators": 100,
     "max_depth": 20,
     "class_weight": "balanced",
-    "random_state": 42
+    "random_state": 42,
+    "learning_rate": 0.1,
+    "C": 1.0,
+    "kernel": "rbf",
+    "gamma": "scale",
+    "max_iter": 1000,
+    "n_neighbors": 5,
+    "weights": "uniform",
+    "hidden_layer_sizes": [100],
+    "alpha": 0.0001
   },
   "features": {
     "use_embeddings": true,

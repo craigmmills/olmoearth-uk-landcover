@@ -561,6 +561,155 @@ class TestRuleBasedDiagnosis:
 
 
 # ---------------------------------------------------------------------------
+# Class 7b: TestRuleBasedClassifierSwap
+# ---------------------------------------------------------------------------
+
+
+class TestRuleBasedClassifierSwap:
+    """Tests for Rule 9 (classifier swap) and Rule 10 (preprocessing)."""
+
+    def _make_metrics_no_overfit(self, sample_metrics):
+        """Return metrics without overfitting gap (skip Rule 1)."""
+        m = copy.deepcopy(sample_metrics)
+        m["training_accuracy"] = 0.76
+        return m
+
+    def _make_cfg_past_ndwi(self):
+        """Config that has exhausted rules 1-8 (NDVI, NDWI on, n_estimators high)."""
+        cfg = copy.deepcopy(DEFAULT_CONFIG)
+        cfg["features"]["add_ndvi"] = True
+        cfg["features"]["add_ndwi"] = True
+        cfg["training"]["n_estimators"] = 300
+        # Skip Rule 1-5 by exhausting Tier 1 options
+        cfg["training"]["exclude_boundary_pixels"] = True
+        cfg["training"]["boundary_buffer_px"] = 2
+        cfg["post_processing"]["mode_filter_size"] = 5
+        cfg["training"]["max_samples_per_class"] = 10000
+        return cfg
+
+    def test_rule9_classifier_swap_to_gb(self, sample_metrics):
+        """Rule 9 proposes GradientBoosting when RF and earlier rules exhausted."""
+        metrics = self._make_metrics_no_overfit(sample_metrics)
+        cfg = self._make_cfg_past_ndwi()
+        h = _rule_based_diagnosis(metrics, cfg, tier=2)
+        assert h.parameter_changes.get("training.classifier") == "GradientBoosting"
+        assert h.parameter_changes.get("training.max_depth") == 3
+        assert h.tier == 2
+
+    def test_rule9_produces_valid_config(self, sample_metrics):
+        """Rule 9 output passes validate_config."""
+        metrics = self._make_metrics_no_overfit(sample_metrics)
+        cfg = self._make_cfg_past_ndwi()
+        h = _rule_based_diagnosis(metrics, cfg, tier=2)
+        merged = _apply_hypothesis_to_config(cfg, h)
+        validate_config(merged)
+
+    def test_rule9_not_fired_when_already_gb(self, sample_metrics):
+        """Rule 9 skipped when classifier is already GradientBoosting."""
+        metrics = self._make_metrics_no_overfit(sample_metrics)
+        cfg = self._make_cfg_past_ndwi()
+        cfg["training"]["classifier"] = "GradientBoosting"
+        cfg["training"]["max_depth"] = 3
+        h = _rule_based_diagnosis(metrics, cfg, tier=2)
+        # Should NOT be another classifier swap, should hit Rule 10 (preprocessing)
+        assert h.parameter_changes.get("training.classifier") is None
+
+    def test_rule10_preprocessing(self, sample_metrics):
+        """Rule 10 proposes scale + PCA when classifier swap already done."""
+        metrics = self._make_metrics_no_overfit(sample_metrics)
+        cfg = self._make_cfg_past_ndwi()
+        cfg["training"]["classifier"] = "GradientBoosting"
+        cfg["training"]["max_depth"] = 3
+        h = _rule_based_diagnosis(metrics, cfg, tier=2)
+        assert h.parameter_changes.get("training.scale_features") is True
+        assert h.parameter_changes.get("training.pca_components") == 100
+        assert h.tier == 2
+
+    def test_rule10_produces_valid_config(self, sample_metrics):
+        """Rule 10 output passes validate_config."""
+        metrics = self._make_metrics_no_overfit(sample_metrics)
+        cfg = self._make_cfg_past_ndwi()
+        cfg["training"]["classifier"] = "GradientBoosting"
+        cfg["training"]["max_depth"] = 3
+        h = _rule_based_diagnosis(metrics, cfg, tier=2)
+        merged = _apply_hypothesis_to_config(cfg, h)
+        validate_config(merged)
+
+    def test_rule9_respects_tier_guard(self, sample_metrics):
+        """Rule 9 does NOT fire at tier 3."""
+        metrics = self._make_metrics_no_overfit(sample_metrics)
+        cfg = self._make_cfg_past_ndwi()
+        h = _rule_based_diagnosis(metrics, cfg, tier=3)
+        # At tier 3, rules 6-10 are all guarded by tier <= 2
+        assert h.parameter_changes.get("training.classifier") is None
+
+
+# ---------------------------------------------------------------------------
+# Tier Params Completeness Tests
+# ---------------------------------------------------------------------------
+
+
+class TestTierParamsCompleteness:
+    """Verify TIER_PARAMS includes all new classifier and preprocessing params."""
+
+    def test_classifier_in_tier2(self):
+        """training.classifier is in Tier 2."""
+        assert "training.classifier" in TIER_PARAMS[2]
+
+    def test_preprocessing_params_in_tier2(self):
+        """Preprocessing params are all in Tier 2."""
+        for param in ["training.pca_components", "training.scale_features",
+                       "training.l2_normalize"]:
+            assert param in TIER_PARAMS[2], f"{param} missing from Tier 2"
+
+    def test_classifier_hyperparams_in_tier2(self):
+        """All classifier-specific hyperparams are in Tier 2."""
+        expected = [
+            "training.learning_rate", "training.C", "training.kernel",
+            "training.gamma", "training.max_iter", "training.n_neighbors",
+            "training.weights", "training.hidden_layer_sizes", "training.alpha",
+        ]
+        for param in expected:
+            assert param in TIER_PARAMS[2], f"{param} missing from Tier 2"
+
+
+# ---------------------------------------------------------------------------
+# Diagnosis Prompt Classifier Content Tests
+# ---------------------------------------------------------------------------
+
+
+class TestDiagnosisPromptClassifierContent:
+    """Verify _build_diagnosis_prompt includes new classifier info."""
+
+    def test_prompt_includes_classifier_constraints(self, default_config, sample_metrics):
+        """System prompt contains all classifier parameter constraints."""
+        system, _ = _build_diagnosis_prompt(
+            sample_metrics, None, "No history", default_config, 2,
+        )
+        assert "training.classifier" in system
+        assert "GradientBoosting" in system
+        assert "training.pca_components" in system
+        assert "training.kernel" in system
+        assert "training.hidden_layer_sizes" in system
+
+    def test_prompt_includes_classifier_swap_rules(self, default_config, sample_metrics):
+        """System prompt contains rules about classifier swaps."""
+        system, _ = _build_diagnosis_prompt(
+            sample_metrics, None, "No history", default_config, 2,
+        )
+        assert "swapping classifiers" in system.lower() or "When swapping classifiers" in system
+        assert "GradientBoosting" in system
+        assert "max_depth" in system
+
+    def test_tier2_description_includes_classifier(self, default_config, sample_metrics):
+        """Tier 2 description mentions training.classifier."""
+        _, user = _build_diagnosis_prompt(
+            sample_metrics, None, "No history", default_config, 2,
+        )
+        assert "training.classifier" in user
+
+
+# ---------------------------------------------------------------------------
 # Class 8: TestApplyHypothesisToConfig
 # ---------------------------------------------------------------------------
 

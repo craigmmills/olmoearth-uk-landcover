@@ -11,6 +11,8 @@ from src.classify import (
     _apply_mode_filter,
     _apply_post_processing,
     _augment_features,
+    _build_classifier,
+    _build_preprocessing_steps,
     _compute_boundary_mask,
     _compute_metrics,
     _compute_spectral_index,
@@ -298,3 +300,235 @@ class TestBackwardCompat:
         result = run_classification()
         assert isinstance(result, tuple)
         assert len(result) == 2
+
+    def test_default_config_produces_bare_rf(self, sample_embeddings_large, sample_labels_large):
+        """Default config returns a bare RandomForestClassifier (not Pipeline)."""
+        cfg = copy.deepcopy(DEFAULT_CONFIG)
+        clf, acc, n = train_classifier(sample_embeddings_large, sample_labels_large, cfg=cfg)
+        assert type(clf).__name__ == "RandomForestClassifier"
+
+
+# ---------------------------------------------------------------------------
+# Build Classifier Tests
+# ---------------------------------------------------------------------------
+
+
+class TestBuildClassifier:
+    def test_random_forest(self, default_config):
+        """RandomForest config returns RandomForestClassifier."""
+        training = default_config["training"]
+        clf = _build_classifier(training)
+        assert type(clf).__name__ == "RandomForestClassifier"
+        assert clf.n_estimators == 100
+        assert clf.max_depth == 20
+
+    def test_gradient_boosting(self, default_config):
+        """GradientBoosting config returns GradientBoostingClassifier."""
+        training = default_config["training"]
+        training["classifier"] = "GradientBoosting"
+        training["max_depth"] = 3
+        clf = _build_classifier(training)
+        assert type(clf).__name__ == "GradientBoostingClassifier"
+        assert clf.learning_rate == 0.1
+        assert clf.max_depth == 3
+
+    def test_svm(self, default_config):
+        """SVM config returns SVC."""
+        training = default_config["training"]
+        training["classifier"] = "SVM"
+        clf = _build_classifier(training)
+        assert type(clf).__name__ == "SVC"
+        assert clf.C == 1.0
+        assert clf.kernel == "rbf"
+
+    def test_logistic_regression(self, default_config):
+        """LogisticRegression config returns LogisticRegression."""
+        training = default_config["training"]
+        training["classifier"] = "LogisticRegression"
+        clf = _build_classifier(training)
+        assert type(clf).__name__ == "LogisticRegression"
+        assert clf.max_iter == 1000
+
+    def test_knn(self, default_config):
+        """KNN config returns KNeighborsClassifier."""
+        training = default_config["training"]
+        training["classifier"] = "KNN"
+        clf = _build_classifier(training)
+        assert type(clf).__name__ == "KNeighborsClassifier"
+        assert clf.n_neighbors == 5
+
+    def test_mlp(self, default_config):
+        """MLP config returns MLPClassifier with tuple hidden_layer_sizes."""
+        training = default_config["training"]
+        training["classifier"] = "MLP"
+        clf = _build_classifier(training)
+        assert type(clf).__name__ == "MLPClassifier"
+        assert clf.hidden_layer_sizes == (100,)
+        assert clf.alpha == 0.0001
+
+    def test_unknown_classifier_raises(self, default_config):
+        """Unknown classifier name raises ValueError."""
+        training = default_config["training"]
+        training["classifier"] = "XGBoost"
+        with pytest.raises(ValueError, match="Unknown classifier"):
+            _build_classifier(training)
+
+    def test_gb_deep_max_depth_warns(self, default_config, capsys):
+        """GradientBoosting with max_depth > 10 prints warning."""
+        training = default_config["training"]
+        training["classifier"] = "GradientBoosting"
+        training["max_depth"] = 20
+        _build_classifier(training)
+        captured = capsys.readouterr()
+        assert "WARNING" in captured.out
+        assert "GradientBoosting" in captured.out
+
+
+# ---------------------------------------------------------------------------
+# Build Preprocessing Steps Tests
+# ---------------------------------------------------------------------------
+
+
+class TestBuildPreprocessingSteps:
+    def test_no_preprocessing(self, default_config):
+        """Default config returns empty steps list."""
+        steps = _build_preprocessing_steps(default_config["training"])
+        assert steps == []
+
+    def test_l2_only(self, default_config):
+        """l2_normalize=True returns single L2 step."""
+        default_config["training"]["l2_normalize"] = True
+        steps = _build_preprocessing_steps(default_config["training"])
+        assert len(steps) == 1
+        assert steps[0][0] == "l2_normalize"
+
+    def test_scale_only(self, default_config):
+        """scale_features=True returns single scaler step."""
+        default_config["training"]["scale_features"] = True
+        steps = _build_preprocessing_steps(default_config["training"])
+        assert len(steps) == 1
+        assert steps[0][0] == "scaler"
+
+    def test_pca_only(self, default_config):
+        """pca_components > 0 returns single PCA step."""
+        default_config["training"]["pca_components"] = 50
+        steps = _build_preprocessing_steps(default_config["training"])
+        assert len(steps) == 1
+        assert steps[0][0] == "pca"
+
+    def test_all_preprocessing_order(self, default_config):
+        """All three enabled returns steps in order: l2 -> scaler -> pca."""
+        default_config["training"]["l2_normalize"] = True
+        default_config["training"]["scale_features"] = True
+        default_config["training"]["pca_components"] = 50
+        steps = _build_preprocessing_steps(default_config["training"])
+        assert len(steps) == 3
+        assert [s[0] for s in steps] == ["l2_normalize", "scaler", "pca"]
+
+    def test_l2_normalize_produces_unit_norms(self, default_config):
+        """L2 normalization produces rows with approximately unit norm."""
+        import numpy as np
+        default_config["training"]["l2_normalize"] = True
+        steps = _build_preprocessing_steps(default_config["training"])
+        l2_transformer = steps[0][1]
+        X = np.array([[3.0, 4.0], [0.0, 0.0], [1.0, 0.0]])
+        result = l2_transformer.transform(X)
+        norms = np.linalg.norm(result, axis=1)
+        # Row with nonzero norm should be ~1.0
+        assert abs(norms[0] - 1.0) < 1e-6
+        # Zero row should stay near zero
+        assert norms[1] < 1e-6
+
+
+# ---------------------------------------------------------------------------
+# Classifier Integration Tests
+# ---------------------------------------------------------------------------
+
+
+class TestClassifierIntegration:
+    """Test that all 6 classifiers work end-to-end via train_classifier."""
+
+    @pytest.fixture
+    def _cfg_for_classifier(self, default_config):
+        """Factory: return config with specified classifier."""
+        def _make(classifier_name, **overrides):
+            cfg = copy.deepcopy(default_config)
+            cfg["training"]["classifier"] = classifier_name
+            for k, v in overrides.items():
+                cfg["training"][k] = v
+            return cfg
+        return _make
+
+    @pytest.mark.parametrize("classifier_name,overrides", [
+        ("RandomForest", {}),
+        ("GradientBoosting", {"max_depth": 3}),
+        ("SVM", {}),
+        ("LogisticRegression", {}),
+        ("KNN", {}),
+        ("MLP", {"max_iter": 200}),
+    ])
+    def test_classifier_trains_and_predicts(
+        self, sample_embeddings_large, sample_labels_large,
+        _cfg_for_classifier, classifier_name, overrides,
+    ):
+        """Each classifier produces (clf, acc, n_samples) and can predict."""
+        cfg = _cfg_for_classifier(classifier_name, **overrides)
+        clf, acc, n_samples = train_classifier(
+            sample_embeddings_large, sample_labels_large, cfg=cfg,
+        )
+        assert hasattr(clf, "predict")
+        assert 0.0 <= acc <= 1.0
+        assert n_samples > 0
+
+        # Verify predict works
+        h, w, d = sample_embeddings_large.shape
+        X = sample_embeddings_large.reshape(-1, d)
+        predictions = clf.predict(X)
+        assert len(predictions) == h * w
+
+    def test_preprocessing_pipeline_trains(
+        self, sample_embeddings_large, sample_labels_large, default_config,
+    ):
+        """Preprocessing (scale + PCA) with default RF produces Pipeline."""
+        cfg = copy.deepcopy(default_config)
+        cfg["training"]["scale_features"] = True
+        # Use pca_components=3 which fits within 4-dim test features
+        cfg["training"]["pca_components"] = 3
+        clf, acc, n_samples = train_classifier(
+            sample_embeddings_large, sample_labels_large, cfg=cfg,
+        )
+        assert hasattr(clf, "named_steps")
+        assert "scaler" in clf.named_steps
+        assert "pca" in clf.named_steps
+        assert "classifier" in clf.named_steps
+
+    def test_pca_fitted_on_training_only(
+        self, sample_embeddings_large, sample_labels_large, default_config,
+    ):
+        """Scaler n_samples_seen_ equals training set size (not full dataset).
+
+        StandardScaler tracks n_samples_seen_, which proves preprocessing
+        was fitted on training data only (Pipeline handles this automatically).
+        """
+        cfg = copy.deepcopy(default_config)
+        cfg["training"]["scale_features"] = True
+        cfg["training"]["pca_components"] = 3
+        clf, acc, n_samples = train_classifier(
+            sample_embeddings_large, sample_labels_large, cfg=cfg,
+        )
+        scaler_step = clf.named_steps["scaler"]
+        assert scaler_step.n_samples_seen_ == n_samples
+
+    def test_pca_too_large_disabled_with_warning(
+        self, sample_embeddings_large, sample_labels_large, default_config, capsys,
+    ):
+        """PCA components >= feature dim is disabled with warning."""
+        cfg = copy.deepcopy(default_config)
+        cfg["training"]["pca_components"] = 100  # Way more than 4 features
+        clf, acc, n_samples = train_classifier(
+            sample_embeddings_large, sample_labels_large, cfg=cfg,
+        )
+        captured = capsys.readouterr()
+        assert "disabling PCA" in captured.out
+        # Should still work, just without PCA
+        assert hasattr(clf, "predict")
