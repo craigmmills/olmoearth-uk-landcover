@@ -431,45 +431,119 @@ def _parse_hypothesis_response(response_text: str) -> dict:
 
 
 def _call_claude(system_prompt: str, user_prompt: str) -> Hypothesis:
-    """Call Claude API and return a validated Hypothesis.
+    """Call Claude via CLI (uses Claude Code subscription) and return a validated Hypothesis.
 
-    Includes one retry for transient errors (rate limits, timeouts) and
-    parsing failures (Claude output is non-deterministic).
+    Uses `claude -p` with --json-schema for structured output. Falls back to
+    Anthropic API if CLI is not available.
 
     Raises:
-        RuntimeError: If ANTHROPIC_API_KEY not set or API fails after retries.
-        ValueError: If Claude's response cannot be parsed into a valid Hypothesis
-                    after retries.
+        RuntimeError: If both CLI and API are unavailable.
+        ValueError: If response cannot be parsed into a valid Hypothesis.
     """
+    import shutil
+    import subprocess
+
+    from pydantic import ValidationError
+
+    hypothesis_schema = json.dumps({
+        "type": "object",
+        "properties": {
+            "hypothesis": {"type": "string"},
+            "component": {"type": "string", "enum": ["training", "features", "post_processing"]},
+            "parameter_changes": {"type": "object"},
+            "expected_impact": {"type": "string"},
+            "risk": {"type": "string"},
+            "tier": {"type": "integer", "minimum": 1, "maximum": 3},
+            "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+            "reasoning": {"type": "string"},
+        },
+        "required": ["hypothesis", "component", "parameter_changes", "expected_impact", "risk", "tier", "confidence", "reasoning"],
+    })
+
+    # Try Claude CLI first (uses subscription, no API key needed)
+    claude_path = shutil.which("claude")
+    if claude_path:
+        print("[diagnose] Calling Claude via CLI (subscription)...")
+        full_prompt = f"{system_prompt}\n\n{user_prompt}"
+        raw_text = ""
+        last_error = None
+
+        for attempt in range(2):
+            try:
+                result = subprocess.run(
+                    [
+                        claude_path, "-p",
+                        "--output-format", "json",
+                        "--json-schema", hypothesis_schema,
+                        "--bare",
+                        "--allowedTools", "",
+                        "--max-budget-usd", "0.50",
+                    ],
+                    input=full_prompt,
+                    capture_output=True,
+                    text=True,
+                    timeout=120,
+                )
+
+                if result.returncode != 0:
+                    raise RuntimeError(f"Claude CLI exited with code {result.returncode}: {result.stderr[:300]}")
+
+                # --output-format json wraps in {"type":"result","result":"..."}
+                raw_text = result.stdout.strip()
+                try:
+                    wrapper = json.loads(raw_text)
+                    if isinstance(wrapper, dict) and "result" in wrapper:
+                        raw_text = wrapper["result"]
+                except json.JSONDecodeError:
+                    pass
+
+                data = _parse_hypothesis_response(raw_text)
+                return Hypothesis(**data)
+
+            except subprocess.TimeoutExpired:
+                last_error = RuntimeError("Claude CLI timed out after 120s")
+                if attempt == 0:
+                    print("[diagnose] CLI timed out, retrying...")
+                    continue
+            except ValidationError as e:
+                raise ValueError(
+                    f"Claude's response failed validation: {e}. "
+                    f"Raw response:\n{raw_text[:500]}"
+                ) from e
+            except (json.JSONDecodeError, ValueError) as e:
+                last_error = e
+                if attempt == 0:
+                    print(f"[diagnose] Parse error: {e}. Retrying...")
+                    continue
+                raise ValueError(
+                    f"Failed to parse Claude CLI response after 2 attempts: {e}. "
+                    f"Raw response:\n{raw_text[:500]}"
+                ) from e
+
+        raise RuntimeError(f"Claude CLI failed after 2 attempts. Last error: {last_error}")
+
+    # Fall back to Anthropic API if CLI not found
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
         raise RuntimeError(
-            "ANTHROPIC_API_KEY not set. "
-            "Set it in your environment or use the rule-based fallback."
+            "Neither Claude CLI nor ANTHROPIC_API_KEY available. "
+            "Install Claude Code or set ANTHROPIC_API_KEY."
         )
 
     try:
         import anthropic
     except ImportError:
         raise RuntimeError(
-            "anthropic package not installed. "
-            "Install it: uv pip install 'olmoearth-uk-landcover[all]'"
+            "anthropic package not installed and Claude CLI not found. "
+            "Install Claude Code or: uv pip install 'olmoearth-uk-landcover[all]'"
         )
-
-    from pydantic import ValidationError
-
-    try:
-        client = anthropic.Anthropic(api_key=api_key)
-    except Exception as e:
-        raise RuntimeError(
-            f"Failed to initialize Anthropic client: {e}"
-        ) from e
 
     raw_text = ""
     last_error = None
-    for attempt in range(2):  # One initial attempt + one retry
+    for attempt in range(2):
         try:
-            print(f"[diagnose] Calling Claude ({config.DIAGNOSE_MODEL})...")
+            print(f"[diagnose] Calling Claude API ({config.DIAGNOSE_MODEL})...")
+            client = anthropic.Anthropic(api_key=api_key)
             response = client.messages.create(
                 model=config.DIAGNOSE_MODEL,
                 max_tokens=2048,
@@ -478,57 +552,27 @@ def _call_claude(system_prompt: str, user_prompt: str) -> Hypothesis:
             )
 
             if not response.content:
-                raise ValueError("Empty response from Claude API (no content blocks)")
+                raise ValueError("Empty response from Claude API")
             raw_text = getattr(response.content[0], "text", None) or ""
             if not raw_text.strip():
                 raise ValueError("Empty text in Claude API response")
 
-            # Parse JSON from response
             data = _parse_hypothesis_response(raw_text)
-
-            # Validate through Pydantic
             return Hypothesis(**data)
 
-        except anthropic.AuthenticationError:
-            raise RuntimeError(
-                "Anthropic API authentication failed. "
-                "Check your ANTHROPIC_API_KEY."
-            )
-        except (anthropic.RateLimitError, anthropic.APITimeoutError,
-                anthropic.APIConnectionError) as e:
+        except Exception as e:
             last_error = e
             if attempt == 0:
                 import time
-                wait = 3
-                print(f"[diagnose] API error: {e}. Retrying in {wait}s...")
-                time.sleep(wait)
-            continue
-        except anthropic.APIError as e:
-            raise RuntimeError(
-                f"Anthropic API call failed: {e}. "
-                f"Check ANTHROPIC_API_KEY and network connectivity."
-            ) from e
-        except ValidationError as e:
-            # Structural issue -- Pydantic validation failure is unlikely to
-            # resolve on retry (same prompt produces similar structure)
-            raise ValueError(
-                f"Claude's response failed Pydantic validation: {e}. "
-                f"Raw response:\n{raw_text[:500]}"
-            ) from e
-        except (json.JSONDecodeError, ValueError) as e:
-            # Parsing failure -- Claude output is non-deterministic, retry once
-            last_error = e
-            if attempt == 0:
-                print(f"[diagnose] Parse error: {e}. Retrying...")
+                print(f"[diagnose] API error: {e}. Retrying in 3s...")
+                time.sleep(3)
                 continue
-            raise ValueError(
-                f"Failed to parse Claude's response after 2 attempts: {e}. "
+            raise RuntimeError(
+                f"Claude API failed after 2 attempts: {e}. "
                 f"Raw response:\n{raw_text[:500]}"
             ) from e
 
-    raise RuntimeError(
-        f"Claude API failed after 2 attempts. Last error: {last_error}"
-    )
+    raise RuntimeError(f"Claude failed after 2 attempts. Last error: {last_error}")
 
 
 def _rule_based_diagnosis(
