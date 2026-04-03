@@ -464,7 +464,11 @@ def _call_claude(system_prompt: str, user_prompt: str) -> Hypothesis:
     claude_path = shutil.which("claude")
     if claude_path:
         print("[diagnose] Calling Claude via CLI (subscription)...")
-        full_prompt = f"{system_prompt}\n\n{user_prompt}"
+        full_prompt = (
+            f"{system_prompt}\n\n{user_prompt}\n\n"
+            "CRITICAL: Return ONLY a valid JSON object with no markdown formatting, "
+            "no code fences, no explanation. Just the raw JSON."
+        )
         raw_text = ""
         last_error = None
 
@@ -473,8 +477,7 @@ def _call_claude(system_prompt: str, user_prompt: str) -> Hypothesis:
                 result = subprocess.run(
                     [
                         claude_path, "-p",
-                        "--output-format", "json",
-                        "--json-schema", hypothesis_schema,
+                        "--output-format", "text",
                         "--allowedTools", "",
                         "--max-budget-usd", "0.50",
                     ],
@@ -487,14 +490,7 @@ def _call_claude(system_prompt: str, user_prompt: str) -> Hypothesis:
                 if result.returncode != 0:
                     raise RuntimeError(f"Claude CLI exited with code {result.returncode}: {result.stderr[:300]}")
 
-                # --output-format json wraps in {"type":"result","result":"..."}
                 raw_text = result.stdout.strip()
-                try:
-                    wrapper = json.loads(raw_text)
-                    if isinstance(wrapper, dict) and "result" in wrapper:
-                        raw_text = wrapper["result"]
-                except json.JSONDecodeError:
-                    pass
 
                 data = _parse_hypothesis_response(raw_text)
                 return Hypothesis(**data)
