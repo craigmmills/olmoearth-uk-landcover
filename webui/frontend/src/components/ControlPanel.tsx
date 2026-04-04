@@ -1,7 +1,8 @@
 import BasemapToggle from '@/components/BasemapToggle';
 import LayerControls from '@/components/LayerControls';
 import ConnectionStatus from '@/components/ConnectionStatus';
-import type { LayerState, BasemapType } from '@/types';
+import LoopStatus from '@/components/LoopStatus';
+import type { LayerState, BasemapType, LoopStatus as LoopStatusType } from '@/types';
 
 interface ControlPanelProps {
   basemap: BasemapType;
@@ -12,6 +13,7 @@ interface ControlPanelProps {
   healthy: boolean | null;
   loading: boolean;
   error: string | null;
+  loopStatus: LoopStatusType;
 }
 
 export default function ControlPanel({
@@ -23,11 +25,13 @@ export default function ControlPanel({
   healthy,
   loading,
   error,
+  loopStatus,
 }: ControlPanelProps) {
   return (
     <div className="flex flex-col gap-4">
       <h1 className="text-lg font-semibold">UK Landcover</h1>
       <ConnectionStatus healthy={healthy} />
+      <LoopStatus status={loopStatus} />
 
       {error && (
         <div className="rounded-md bg-destructive/10 p-3 text-sm text-destructive">

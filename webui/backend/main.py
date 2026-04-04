@@ -115,6 +115,18 @@ class SSEEvent(BaseModel):
     timestamp: str
 
 
+class SSESessionCompleteEvent(BaseModel):
+    """Shape of SSE session_complete events."""
+
+    event: str = "session_complete"
+    session_id: str
+    end_time: str
+    stop_reason: str
+    best_iteration: int | None = None
+    final_score: float | None = None
+    n_iterations: int
+
+
 # ---------------------------------------------------------------------------
 # Input Validation Helpers
 # ---------------------------------------------------------------------------
@@ -499,9 +511,12 @@ async def _iteration_event_generator():
 
     Polls every 2 seconds. Sends keepalive comment every 15 seconds
     (every 7-8 poll cycles) to prevent proxy/client timeouts.
+    Also detects session completions and emits session_complete events.
     """
     known_iterations: dict[str, set[int]] = {}
+    known_completed: set[str] = set()
     _scan_all_sessions(known_iterations)
+    _scan_completed_sessions(known_completed)
 
     poll_count = 0
     while True:
@@ -512,6 +527,12 @@ async def _iteration_event_generator():
         for event in new_events:
             data = json.dumps(event)
             yield f"event: new_iteration\ndata: {data}\n\n"
+
+        # Check for newly completed sessions
+        completion_events = _scan_for_completed_sessions(known_completed)
+        for event in completion_events:
+            data = json.dumps(event)
+            yield f"event: session_complete\ndata: {data}\n\n"
 
         # Send keepalive comment every ~15 seconds (every 7 poll cycles)
         if poll_count % 7 == 0:
@@ -586,6 +607,66 @@ def _scan_for_new_iterations(known: dict[str, set[int]]) -> list[dict]:
 
         known[session_id] = current_nums
 
+    return events
+
+
+def _scan_completed_sessions(known_completed: set[str]) -> None:
+    """Populate set of already-completed session IDs on connect."""
+    from src import config
+
+    base = config.EXPERIMENTS_BASE_DIR
+    if not base.exists():
+        return
+    for entry in base.iterdir():
+        if not entry.is_dir() or not entry.name.startswith("session_"):
+            continue
+        if entry.is_symlink():
+            continue
+        meta_path = entry / "session_meta.json"
+        if meta_path.exists():
+            try:
+                with open(meta_path) as f:
+                    meta = json.load(f)
+                if meta.get("end_time") is not None:
+                    known_completed.add(entry.name)
+            except (json.JSONDecodeError, OSError):
+                pass
+
+
+def _scan_for_completed_sessions(known_completed: set[str]) -> list[dict]:
+    """Detect sessions that have newly completed since last scan."""
+    from src import config
+
+    events: list[dict] = []
+    base = config.EXPERIMENTS_BASE_DIR
+    if not base.exists():
+        return events
+    for entry in base.iterdir():
+        if not entry.is_dir() or not entry.name.startswith("session_"):
+            continue
+        if entry.is_symlink():
+            continue
+        session_id = entry.name
+        if session_id in known_completed:
+            continue
+        meta_path = entry / "session_meta.json"
+        if not meta_path.exists():
+            continue
+        try:
+            with open(meta_path) as f:
+                meta = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            continue
+        if meta.get("end_time") is not None:
+            known_completed.add(session_id)
+            events.append({
+                "session_id": session_id,
+                "end_time": meta.get("end_time", ""),
+                "stop_reason": meta.get("stop_reason", ""),
+                "best_iteration": meta.get("best_iteration"),
+                "final_score": meta.get("final_score"),
+                "n_iterations": meta.get("n_iterations", 0),
+            })
     return events
 
 

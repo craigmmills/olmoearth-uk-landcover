@@ -17,7 +17,7 @@ import {
   CollapsibleContent,
 } from '@/components/ui/collapsible';
 import { useSessionSSE } from '@/hooks/useSessionSSE';
-import type { IterationSummary, SessionSummary } from '@/types';
+import type { IterationSummary } from '@/types';
 
 /** Skeleton for the dashboard while loading iterations */
 function DashboardSkeleton() {
@@ -90,6 +90,8 @@ export function ExperimentDashboard() {
     return () => controller.abort();
   }, [selectedSessionId]);
 
+  const endOfListRef = useRef<HTMLDivElement>(null);
+
   // SSE: auto-refresh iterations when a new one arrives for the current session
   const handleNewIteration = useCallback(
     (event: { session_id: string; iteration: number }) => {
@@ -108,6 +110,11 @@ export function ExperimentDashboard() {
               );
               setBestIteration(best.iteration);
             }
+
+            // Scroll to latest iteration after React renders
+            requestAnimationFrame(() => {
+              endOfListRef.current?.scrollIntoView({ behavior: 'smooth' });
+            });
           })
           .catch(() => {
             // Silently ignore SSE refresh errors
@@ -117,7 +124,7 @@ export function ExperimentDashboard() {
     [selectedSessionId],
   );
 
-  useSessionSSE(handleNewIteration);
+  useSessionSSE({ onNewIteration: handleNewIteration });
 
   // We need the session summary to pass bestIteration from the session metadata.
   // Since SessionSelector internally fetches sessions, we also listen for
@@ -177,10 +184,11 @@ export function ExperimentDashboard() {
               value={expandedItems}
               onValueChange={setExpandedItems}
             >
-              {iterations.map((iteration) => {
+              {iterations.map((iteration, index) => {
                 const itemId = `iteration-${iteration.iteration}`;
                 const isBest = iteration.iteration === bestIteration;
                 const isExpanded = expandedItems.includes(itemId);
+                const isNewest = index === iterations.length - 1;
                 const { summaryContent, detailContent } = IterationCard({
                   sessionId: selectedSessionId!,
                   iteration,
@@ -192,7 +200,7 @@ export function ExperimentDashboard() {
                   <AccordionItem
                     key={itemId}
                     value={itemId}
-                    className={isBest ? 'border-amber-400 bg-amber-50/50' : ''}
+                    className={`${isBest ? 'border-amber-400 bg-amber-50/50' : ''} ${isNewest ? 'animate-fade-in-up' : ''}`}
                   >
                     <AccordionTrigger className="hover:no-underline px-2">
                       {summaryContent}
@@ -205,6 +213,9 @@ export function ExperimentDashboard() {
               })}
             </Accordion>
           )}
+
+          {/* Scroll sentinel for auto-scroll on new iterations */}
+          <div ref={endOfListRef} />
 
           {/* Empty state */}
           {!loading && !error && selectedSessionId && iterations.length === 0 && (

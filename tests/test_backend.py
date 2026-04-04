@@ -354,3 +354,105 @@ class TestSSEEvents:
         session_dir = config.EXPERIMENTS_BASE_DIR / "session_20260404_093509"
         nums = _get_iteration_nums(session_dir)
         assert nums == {1, 2}
+
+
+class TestSSESessionComplete:
+    """Tests for session_complete SSE event detection."""
+
+    def test_scan_completed_sessions_initial(self, mock_experiments):
+        """Already-complete sessions are recorded in known_completed."""
+        from webui.backend.main import _scan_completed_sessions
+
+        known: set[str] = set()
+        _scan_completed_sessions(known)
+        # mock_experiments fixture has end_time set, so session is complete
+        assert "session_20260404_093509" in known
+
+    def test_scan_completed_sessions_empty_dir(self, mock_experiments, tmp_path):
+        """No crash when experiments dir doesn't exist."""
+        from webui.backend.main import _scan_completed_sessions
+        import src.config as config
+
+        orig = config.EXPERIMENTS_BASE_DIR
+        config.EXPERIMENTS_BASE_DIR = tmp_path / "nonexistent"
+        known: set[str] = set()
+        _scan_completed_sessions(known)
+        assert len(known) == 0
+        config.EXPERIMENTS_BASE_DIR = orig
+
+    def test_scan_for_completed_sessions_detects_new(self, mock_experiments, tmp_path):
+        """When end_time appears in session_meta.json, emit event."""
+        from webui.backend.main import _scan_for_completed_sessions, _scan_completed_sessions
+        import src.config as config
+
+        base = config.EXPERIMENTS_BASE_DIR
+
+        # Create a second session that is still running (end_time is null)
+        running_session = base / "session_20260404_100000"
+        running_session.mkdir(parents=True)
+        (running_session / "session_meta.json").write_text(json.dumps({
+            "session_id": "session_20260404_100000",
+            "start_time": "2026-04-04T10:00:00+00:00",
+            "end_time": None,
+            "stop_reason": None,
+            "best_iteration": None,
+            "final_score": None,
+            "n_iterations": 1,
+        }))
+        iter1 = running_session / "iteration_001"
+        iter1.mkdir()
+        (iter1 / "metadata.json").write_text(json.dumps({
+            "iteration": 1,
+            "timestamp": "2026-04-04T10:01:00+00:00",
+            "status": "accepted",
+        }))
+
+        # Initial scan: the first session (from fixture) is complete; new session is running
+        known: set[str] = set()
+        _scan_completed_sessions(known)
+        assert "session_20260404_093509" in known
+        assert "session_20260404_100000" not in known
+
+        # First poll: running session is not yet complete
+        events = _scan_for_completed_sessions(known)
+        assert len(events) == 0
+
+        # Now simulate the autocorrect loop finishing
+        (running_session / "session_meta.json").write_text(json.dumps({
+            "session_id": "session_20260404_100000",
+            "start_time": "2026-04-04T10:00:00+00:00",
+            "end_time": "2026-04-04T10:15:00+00:00",
+            "stop_reason": "target_reached",
+            "best_iteration": 1,
+            "final_score": 0.95,
+            "n_iterations": 1,
+        }))
+
+        # Second poll: should detect the completion
+        events = _scan_for_completed_sessions(known)
+        assert len(events) == 1
+        assert events[0]["session_id"] == "session_20260404_100000"
+        assert events[0]["stop_reason"] == "target_reached"
+        assert events[0]["best_iteration"] == 1
+        assert events[0]["final_score"] == 0.95
+        assert events[0]["n_iterations"] == 1
+
+        # Third poll: should not re-emit (now in known_completed)
+        events = _scan_for_completed_sessions(known)
+        assert len(events) == 0
+        assert "session_20260404_100000" in known
+
+    def test_scan_for_completed_sessions_handles_corrupt_meta(self, mock_experiments):
+        """Corrupt session_meta.json is skipped without crashing."""
+        from webui.backend.main import _scan_for_completed_sessions
+        import src.config as config
+
+        base = config.EXPERIMENTS_BASE_DIR
+        corrupt_session = base / "session_20260404_110000"
+        corrupt_session.mkdir(parents=True)
+        (corrupt_session / "session_meta.json").write_text("NOT JSON{{{")
+
+        known: set[str] = set()
+        events = _scan_for_completed_sessions(known)
+        # Should not crash; corrupt session is skipped
+        assert "session_20260404_110000" not in known

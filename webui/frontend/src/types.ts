@@ -129,3 +129,30 @@ export interface MetricsDiff {
   overall_accuracy: { a: number; b: number; delta: number };
   per_class: Record<string, { f1: { a: number; b: number; delta: number } }>;
 }
+
+// --- SSE Event Types (Issue #24) ---
+
+/** SSE new_iteration event data -- mirrors backend SSEEvent */
+export interface SSENewIterationEvent {
+  session_id: string;
+  iteration: number;
+  timestamp: string;
+}
+
+/** SSE session_complete event data -- mirrors backend SSESessionCompleteEvent */
+export interface SSESessionCompleteEvent {
+  session_id: string;
+  end_time: string;
+  stop_reason: string;
+  best_iteration: number | null;
+  final_score: number | null;
+  n_iterations: number;
+}
+
+/** Loop status for the status indicator in ControlPanel */
+export type LoopStatus =
+  | { state: 'connecting' }
+  | { state: 'running'; sessionId: string; currentIteration: number }
+  | { state: 'complete'; sessionId: string; nIterations: number; bestScore: number | null; stopReason: string }
+  | { state: 'idle' }
+  | { state: 'error'; message: string };

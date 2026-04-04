@@ -32,6 +32,10 @@ export async function listSessions(): Promise<SessionSummary[]> {
   return fetchJson<SessionSummary[]>('/api/sessions');
 }
 
+export async function getSession(sessionId: string): Promise<SessionSummary> {
+  return fetchJson<SessionSummary>(`/api/sessions/${sessionId}`);
+}
+
 export async function listIterations(
   sessionId: string,
   signal?: AbortSignal,

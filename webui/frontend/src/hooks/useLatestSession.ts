@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import {
   listSessions,
   listIterations,
@@ -9,7 +9,7 @@ import {
 import type { SessionSummary, LayerState } from '@/types';
 import { DEFAULT_LAYERS } from '@/constants';
 
-interface SessionState {
+interface SessionStateInternal {
   loading: boolean;
   error: string | null;
   sessionId: string | null;
@@ -17,12 +17,17 @@ interface SessionState {
   layers: LayerState[];
 }
 
+export interface SessionState extends SessionStateInternal {
+  /** Call to update the displayed iteration (e.g., on SSE event) */
+  refreshIteration: (sessionId: string, iterationNum: number) => void;
+}
+
 /**
  * On mount, fetches the latest session and its best iteration,
  * then resolves tile URL templates for each overlay layer.
  */
 export function useLatestSession(): SessionState {
-  const [state, setState] = useState<SessionState>({
+  const [state, setState] = useState<SessionStateInternal>({
     loading: true,
     error: null,
     sessionId: null,
@@ -124,5 +129,34 @@ export function useLatestSession(): SessionState {
     return () => { cancelled = true; };
   }, []);
 
-  return state;
+  const refreshIteration = useCallback(
+    (newSessionId: string, newIterationNum: number) => {
+      const layers: LayerState[] = DEFAULT_LAYERS.map((def) => {
+        let tileUrlTemplate: string | null = null;
+        if (def.year === '2021' || def.year === '2023') {
+          tileUrlTemplate = buildTileUrl(newSessionId, newIterationNum, def.year);
+        } else if (def.year === 'change') {
+          const cogPath = deriveChangeMapCogPath(newSessionId, newIterationNum);
+          tileUrlTemplate = buildChangeMapTileUrl(cogPath);
+        }
+        return {
+          id: def.id,
+          label: def.label,
+          visible: def.visible,
+          opacity: def.opacity,
+          tileUrlTemplate,
+        };
+      });
+      setState({
+        loading: false,
+        error: null,
+        sessionId: newSessionId,
+        iterationNum: newIterationNum,
+        layers,
+      });
+    },
+    [],
+  );
+
+  return { ...state, refreshIteration };
 }
