@@ -329,6 +329,23 @@ def _register_signal_handler(state: dict) -> None:
         except Exception:
             pass  # Best effort
 
+        # Attempt to update session meta on interrupt
+        try:
+            session_dir = state.get("session_dir")
+            if session_dir:
+                import datetime as _dt
+                from src.experiment import update_session_meta
+                best_score_val = state.get("best_score")
+                update_session_meta(session_dir, {
+                    "end_time": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+                    "stop_reason": "interrupted",
+                    "best_iteration": state.get("best_iter"),
+                    "final_score": best_score_val.overall_score if best_score_val else None,
+                    "n_iterations": len(state.get("history", [])),
+                })
+        except Exception:
+            pass  # Best effort
+
         signal.signal(signal.SIGINT, original_sigint)
         signal.signal(signal.SIGTERM, original_sigterm)
         if signum == signal.SIGINT:
@@ -737,12 +754,16 @@ def run_autocorrect(
     from src.experiment import (
         load_config, save_config, load_experiment,
         update_experiment_status, get_next_iteration_number,
+        create_session,
     )
     from src.classify import run_classification
     from src.evaluate import run_evaluation
 
     # --- Initialization ---
     original_config = copy.deepcopy(load_config())
+
+    # Create a new session for this run
+    session_dir = create_session(original_config)
 
     # Mutable state container for signal handler (RT2-6, RT4-17)
     state = {
@@ -754,6 +775,7 @@ def run_autocorrect(
         "max_iterations": max_iterations,
         "target_score": target_score,
         "patience": patience,
+        "session_dir": session_dir,  # Track for finalization
     }
     _register_signal_handler(state)
 
@@ -995,6 +1017,20 @@ def run_autocorrect(
     summary = _build_summary(state, stop_reason=stop_reason)
     _print_summary(summary)
     _save_summary_md(summary)
+
+    # Update session metadata
+    import datetime as _dt
+    from src.experiment import update_session_meta
+
+    session_dir = state.get("session_dir")
+    if session_dir:
+        update_session_meta(session_dir, {
+            "end_time": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+            "stop_reason": stop_reason,
+            "best_iteration": best_iter,
+            "final_score": best_score.overall_score if best_score else None,
+            "n_iterations": len(history),
+        })
 
     return summary
 

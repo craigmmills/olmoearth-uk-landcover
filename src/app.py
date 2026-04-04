@@ -37,9 +37,9 @@ def check_outputs_exist() -> bool:
     return all(p.exists() for p in required)
 
 
-def check_experiments_exist() -> bool:
+def check_experiments_exist(session_dir: Path | None = None) -> bool:
     """Check if any experiment iterations exist."""
-    experiments_dir = config.EXPERIMENTS_DIR
+    experiments_dir = session_dir or config.EXPERIMENTS_DIR
     if not experiments_dir.exists():
         return False
     return any(
@@ -48,8 +48,95 @@ def check_experiments_exist() -> bool:
     )
 
 
-def load_iteration_details(iteration_num: int) -> dict:
+def _list_iterations_from_dir(session_dir: Path) -> list[dict]:
+    """List iterations from a specific session directory (read-only, for UI).
+
+    This is a thin helper for reading iteration data from non-latest sessions
+    without modifying the list_iterations() function's global state.
+    """
+    if not session_dir.exists():
+        return []
+    iterations = []
+    for entry in sorted(session_dir.iterdir()):
+        if not entry.is_dir() or not entry.name.startswith("iteration_"):
+            continue
+        suffix = entry.name[len("iteration_"):]
+        try:
+            num = int(suffix)
+        except ValueError:
+            continue
+        metadata_path = entry / "metadata.json"
+        if not metadata_path.exists():
+            continue
+        with open(metadata_path) as f:
+            metadata = json.load(f)
+        item = {
+            "iteration": num,
+            "timestamp": metadata.get("timestamp", ""),
+            "status": metadata.get("status", "unknown"),
+        }
+        metrics_path = entry / "metrics.json"
+        if metrics_path.exists():
+            with open(metrics_path) as f:
+                metrics = json.load(f)
+            item["overall_accuracy"] = metrics.get("overall_accuracy")
+        else:
+            item["overall_accuracy"] = None
+        iterations.append(item)
+    iterations.sort(key=lambda x: x["iteration"])
+    return iterations
+
+
+def _render_compare_sessions(sessions: list[dict]) -> None:
+    """Render the Compare Sessions table."""
+    import pandas as pd
+
+    if len(sessions) < 2:
+        return
+
+    with st.expander("Compare Sessions", expanded=False):
+        rows = []
+        for s in sessions:
+            # Count accepted changes (exclude baseline iteration 1)
+            accepted_count = 0
+            session_path = s.get("path")
+            if session_path and session_path.exists():
+                for entry in session_path.iterdir():
+                    if not entry.is_dir() or not entry.name.startswith("iteration_"):
+                        continue
+                    # Extract iteration number
+                    suffix = entry.name[len("iteration_"):]
+                    try:
+                        iter_num = int(suffix)
+                    except ValueError:
+                        continue
+                    if iter_num <= 1:
+                        continue  # Skip baseline
+                    meta_path = entry / "metadata.json"
+                    if meta_path.exists():
+                        with open(meta_path) as f:
+                            meta = json.load(f)
+                        if meta.get("status") == "accepted":
+                            accepted_count += 1
+
+            rows.append({
+                "Session": s["start_time"][:19] if s["start_time"] else s["session_id"],
+                "Iterations": s["n_iterations"],
+                "Best Score": f"{s['final_score']:.2f}" if s["final_score"] else "N/A",
+                "Accepted Changes": accepted_count,
+                "Stop Reason": s.get("stop_reason") or "N/A",
+            })
+
+        df = pd.DataFrame(rows)
+        st.dataframe(df, hide_index=True, use_container_width=True)
+
+
+def load_iteration_details(iteration_num: int, session_dir: Path | None = None) -> dict:
     """Load all available data for a single experiment iteration.
+
+    Args:
+        iteration_num: The iteration number to load.
+        session_dir: Session directory to load from. Defaults to config.EXPERIMENTS_DIR.
 
     Returns dict with keys: metadata, metrics, config, hypothesis,
     evaluations, images, config_diff, metrics_diff.
@@ -61,10 +148,12 @@ def load_iteration_details(iteration_num: int) -> dict:
     """
     from src.experiment import load_experiment, compare_experiments
 
-    # Load core data (config, metrics, metadata) - always present
-    experiment = load_experiment(iteration_num)
+    experiments_dir = session_dir or config.EXPERIMENTS_DIR
 
-    iteration_dir = config.EXPERIMENTS_DIR / f"iteration_{iteration_num:03d}"
+    # Load core data (config, metrics, metadata) - always present
+    experiment = load_experiment(iteration_num, session_dir=experiments_dir)
+
+    iteration_dir = experiments_dir / f"iteration_{iteration_num:03d}"
 
     # Load hypothesis from the PREVIOUS iteration's directory.
     # hypothesis.json in iteration N-1 contains the hypothesis that was
@@ -72,7 +161,7 @@ def load_iteration_details(iteration_num: int) -> dict:
     # is no previous iteration and no hypothesis.
     hypothesis = None
     if iteration_num > 1:
-        prev_dir = config.EXPERIMENTS_DIR / f"iteration_{iteration_num - 1:03d}"
+        prev_dir = experiments_dir / f"iteration_{iteration_num - 1:03d}"
         hypothesis_path = prev_dir / "hypothesis.json"
         if hypothesis_path.exists():
             with open(hypothesis_path) as f:
@@ -100,7 +189,9 @@ def load_iteration_details(iteration_num: int) -> dict:
     metrics_diff = None
     if iteration_num > 1:
         try:
-            comparison = compare_experiments(iteration_num - 1, iteration_num)
+            comparison = compare_experiments(
+                iteration_num - 1, iteration_num, session_dir=experiments_dir
+            )
             config_diff = comparison.get("config_diff")
             metrics_diff = comparison.get("metrics_diff")
         except FileNotFoundError:
@@ -360,7 +451,7 @@ def render_iteration_card(data: dict, is_best: bool) -> None:
                                 )
 
 
-def _detect_loop_status() -> str:
+def _detect_loop_status(session_dir: Path | None = None) -> str:
     """Detect whether the autocorrect loop is running, complete, or idle.
 
     Returns one of: "running", "complete", "idle".
@@ -368,18 +459,25 @@ def _detect_loop_status() -> str:
     - "complete": experiments exist and SUMMARY.md is present (loop finished)
     - "idle": no experiments found
     """
-    if not check_experiments_exist():
+    experiments_dir = session_dir or config.EXPERIMENTS_DIR
+
+    if not check_experiments_exist(session_dir=experiments_dir):
         return "idle"
 
     # Check for pending iterations (indicates loop is still running)
     from src.experiment import list_iterations
 
-    iterations = list_iterations()
+    # For non-latest sessions, list iterations from the specific dir
+    if session_dir and session_dir != config.EXPERIMENTS_DIR:
+        iterations = _list_iterations_from_dir(experiments_dir)
+    else:
+        iterations = list_iterations()
+
     if any(it["status"] == "pending" for it in iterations):
         return "running"
 
     # SUMMARY.md presence indicates the loop ran to completion
-    summary_path = config.EXPERIMENTS_DIR / "SUMMARY.md"
+    summary_path = experiments_dir / "SUMMARY.md"
     if summary_path.exists():
         return "complete"
 
@@ -396,20 +494,30 @@ def render_experiments_section() -> None:
     allowing live monitoring of the autocorrect loop without affecting
     the Map View tab.
     """
-    from src.experiment import list_iterations
+    from src.experiment import list_iterations, get_session_dir
+
+    # Read session from session_state (set by selector in main())
+    selected_session_id = st.session_state.get("session_selector")
+    if selected_session_id:
+        try:
+            experiments_dir = get_session_dir(selected_session_id)
+        except FileNotFoundError:
+            experiments_dir = config.EXPERIMENTS_DIR
+    else:
+        experiments_dir = config.EXPERIMENTS_DIR
 
     st.header("Experiment History")
     st.markdown("Timeline of all autocorrect iterations with hypotheses, scores, and Gemini feedback.")
 
     # Show loop status indicator
-    loop_status = _detect_loop_status()
+    loop_status = _detect_loop_status(session_dir=experiments_dir)
     if loop_status == "running":
         st.status("Loop running... (auto-refreshing every 10s)", state="running")
     elif loop_status == "complete":
         st.success("Loop complete")
 
     # Guard: no experiments
-    if not check_experiments_exist():
+    if not check_experiments_exist(session_dir=experiments_dir):
         st.info(
             "No experiments found. Run the autocorrect loop first:\n\n"
             "```\nuv run python -m src.autocorrect\n```"
@@ -417,13 +525,21 @@ def render_experiments_section() -> None:
         return
 
     # Show SUMMARY.md if it exists
-    summary_path = config.EXPERIMENTS_DIR / "SUMMARY.md"
+    summary_path = experiments_dir / "SUMMARY.md"
     if summary_path.exists():
         with st.expander("Experiment Summary (SUMMARY.md)", expanded=False):
             st.markdown(summary_path.read_text())
 
     # Load iteration list
-    iterations = list_iterations()
+    # Use list_iterations() for latest, _list_iterations_from_dir() for others
+    is_latest = (experiments_dir == config.EXPERIMENTS_DIR or
+                 (experiments_dir.resolve() == config.EXPERIMENTS_DIR.resolve()
+                  if config.EXPERIMENTS_DIR.exists() else False))
+    if is_latest:
+        iterations = list_iterations()
+    else:
+        iterations = _list_iterations_from_dir(experiments_dir)
+
     if not iterations:
         st.warning("Experiment directories exist but no valid iterations found.")
         return
@@ -456,7 +572,7 @@ def render_experiments_section() -> None:
         is_best = (iteration_num == best_iteration)
 
         try:
-            details = load_iteration_details(iteration_num)
+            details = load_iteration_details(iteration_num, session_dir=experiments_dir)
             render_iteration_card(details, is_best=is_best)
         except FileNotFoundError as e:
             st.warning(f"Could not load iteration {iteration_num:03d}: {e}")
@@ -690,6 +806,35 @@ def main():
             st.dataframe(df, use_container_width=True)
 
     with tab_experiments:
+        from src.experiment import list_sessions, get_session_dir
+
+        sessions = list_sessions()
+        if sessions:
+            session_options = {
+                s["session_id"]: (
+                    f"{s['start_time'][:19]} "
+                    f"({s['n_iterations']} iters, "
+                    f"score: {s['final_score']:.2f})" if s["final_score"] else
+                    f"{s['start_time'][:19]} ({s['n_iterations']} iters)"
+                )
+                for s in sessions
+            }
+            st.selectbox(
+                "Session",
+                options=list(session_options.keys()),
+                format_func=lambda x: session_options[x],
+                index=0,
+                key="session_selector",
+            )
+
+            # Compare Sessions table
+            if len(sessions) > 1:
+                _render_compare_sessions(sessions)
+        else:
+            # No sessions yet -- clear session_state
+            if "session_selector" in st.session_state:
+                del st.session_state["session_selector"]
+
         render_experiments_section()
 
 

@@ -84,17 +84,19 @@ def sample_hypothesis():
 def mock_pipeline(mocker, tmp_path, sample_metrics):
     """Mock all pipeline dependencies for orchestrator testing.
 
-    Redirects EXPERIMENTS_DIR and OUTPUT_DIR to tmp_path.
+    Redirects EXPERIMENTS_BASE_DIR, EXPERIMENTS_DIR, and OUTPUT_DIR to tmp_path.
     Mocks run_classification to create experiment ledger entries and fake GeoTIFFs.
     Mocks run_evaluation to return None (metrics-only).
     Mocks run_diagnosis to return a hypothesis.
     """
-    mocker.patch.object(config, "EXPERIMENTS_DIR", tmp_path / "experiments")
+    base_dir = tmp_path / "experiments"
+    mocker.patch.object(config, "EXPERIMENTS_BASE_DIR", base_dir)
+    mocker.patch.object(config, "EXPERIMENTS_DIR", base_dir / "latest")
     mocker.patch.object(config, "OUTPUT_DIR", tmp_path / "output")
     mocker.patch.object(config, "PROJECT_ROOT", tmp_path)
 
     (tmp_path / "output").mkdir()
-    (tmp_path / "experiments").mkdir()
+    base_dir.mkdir()
 
     # Write a config file
     config_path = tmp_path / "experiment_config.json"
@@ -377,8 +379,15 @@ class TestApplyHypothesis:
 class TestGetLatestIteration:
     def test_returns_latest(self, mocker, tmp_path):
         """Returns highest iteration number."""
-        mocker.patch.object(config, "EXPERIMENTS_DIR", tmp_path / "experiments")
-        (tmp_path / "experiments").mkdir()
+        base_dir = tmp_path / "experiments"
+        base_dir.mkdir()
+        session_dir = base_dir / "session_test"
+        session_dir.mkdir()
+        latest_link = base_dir / "latest"
+        latest_link.symlink_to(session_dir.name)
+
+        mocker.patch.object(config, "EXPERIMENTS_BASE_DIR", base_dir)
+        mocker.patch.object(config, "EXPERIMENTS_DIR", latest_link)
 
         from src.experiment import save_experiment
         save_experiment(DEFAULT_CONFIG, {"overall_accuracy": 0.7})
@@ -388,8 +397,15 @@ class TestGetLatestIteration:
 
     def test_raises_when_empty(self, mocker, tmp_path):
         """RuntimeError when no iterations exist."""
-        mocker.patch.object(config, "EXPERIMENTS_DIR", tmp_path / "experiments")
-        (tmp_path / "experiments").mkdir()
+        base_dir = tmp_path / "experiments"
+        base_dir.mkdir()
+        session_dir = base_dir / "session_test"
+        session_dir.mkdir()
+        latest_link = base_dir / "latest"
+        latest_link.symlink_to(session_dir.name)
+
+        mocker.patch.object(config, "EXPERIMENTS_BASE_DIR", base_dir)
+        mocker.patch.object(config, "EXPERIMENTS_DIR", latest_link)
 
         with pytest.raises(RuntimeError, match="No experiment iterations"):
             _get_latest_iteration()
@@ -477,11 +493,19 @@ class TestBackupOutputs:
 class TestRestoreBestOutputs:
     def test_restores_to_output(self, mocker, tmp_path):
         """GeoTIFFs copied from iteration dir to output/."""
-        mocker.patch.object(config, "EXPERIMENTS_DIR", tmp_path / "experiments")
+        base_dir = tmp_path / "experiments"
+        base_dir.mkdir()
+        session_dir = base_dir / "session_test"
+        session_dir.mkdir()
+        latest_link = base_dir / "latest"
+        latest_link.symlink_to(session_dir.name)
+
+        mocker.patch.object(config, "EXPERIMENTS_BASE_DIR", base_dir)
+        mocker.patch.object(config, "EXPERIMENTS_DIR", latest_link)
         mocker.patch.object(config, "OUTPUT_DIR", tmp_path / "output")
         (tmp_path / "output").mkdir()
 
-        iter_dir = tmp_path / "experiments" / "iteration_001"
+        iter_dir = session_dir / "iteration_001"
         iter_dir.mkdir(parents=True)
 
         for year in config.TIME_RANGES:
@@ -803,13 +827,20 @@ class TestSummary:
 
     def test_save_summary_md(self, mocker, tmp_path):
         """SUMMARY.md written with iteration table."""
-        mocker.patch.object(config, "EXPERIMENTS_DIR", tmp_path / "experiments")
-        (tmp_path / "experiments").mkdir()
+        base_dir = tmp_path / "experiments"
+        base_dir.mkdir()
+        session_dir = base_dir / "session_test"
+        session_dir.mkdir()
+        latest_link = base_dir / "latest"
+        latest_link.symlink_to(session_dir.name)
+
+        mocker.patch.object(config, "EXPERIMENTS_BASE_DIR", base_dir)
+        mocker.patch.object(config, "EXPERIMENTS_DIR", latest_link)
 
         summary = self._make_summary()
         _save_summary_md(summary)
 
-        md_path = tmp_path / "experiments" / "SUMMARY.md"
+        md_path = session_dir / "SUMMARY.md"
         assert md_path.exists()
         content = md_path.read_text()
         assert "# Self-Correction Loop Summary" in content
@@ -821,8 +852,15 @@ class TestSummary:
 
     def test_summary_handles_no_accepted(self, mocker, tmp_path):
         """SUMMARY.md handles zero accepted changes."""
-        mocker.patch.object(config, "EXPERIMENTS_DIR", tmp_path / "experiments")
-        (tmp_path / "experiments").mkdir()
+        base_dir = tmp_path / "experiments"
+        base_dir.mkdir()
+        session_dir = base_dir / "session_test"
+        session_dir.mkdir()
+        latest_link = base_dir / "latest"
+        latest_link.symlink_to(session_dir.name)
+
+        mocker.patch.object(config, "EXPERIMENTS_BASE_DIR", base_dir)
+        mocker.patch.object(config, "EXPERIMENTS_DIR", latest_link)
 
         summary = self._make_summary()
         # Remove accepted changes
@@ -830,7 +868,7 @@ class TestSummary:
             h["config_changes"] = None
         _save_summary_md(summary)
 
-        content = (tmp_path / "experiments" / "SUMMARY.md").read_text()
+        content = (session_dir / "SUMMARY.md").read_text()
         assert "No improvements were accepted beyond the baseline." in content
 
 
@@ -964,8 +1002,28 @@ class TestRunAutocorrect:
     def test_summary_generated(self, mock_pipeline):
         """SUMMARY.md exists after loop completes."""
         run_autocorrect(max_iterations=1, target_score=10.0, patience=3)
-        summary_path = mock_pipeline["tmp_path"] / "experiments" / "SUMMARY.md"
+        # SUMMARY.md is inside the session dir (via latest symlink)
+        latest = mock_pipeline["tmp_path"] / "experiments" / "latest"
+        summary_path = latest / "SUMMARY.md"
         assert summary_path.exists()
+
+    def test_session_created_with_meta(self, mock_pipeline):
+        """Autocorrect creates a session directory with session_meta.json."""
+        run_autocorrect(max_iterations=1, target_score=10.0, patience=3)
+        base_dir = mock_pipeline["tmp_path"] / "experiments"
+        # Find session dirs
+        session_dirs = [
+            d for d in base_dir.iterdir()
+            if d.is_dir() and d.name.startswith("session_") and not d.is_symlink()
+        ]
+        assert len(session_dirs) == 1
+        meta_path = session_dirs[0] / "session_meta.json"
+        assert meta_path.exists()
+        with open(meta_path) as f:
+            meta = json.load(f)
+        assert meta["end_time"] is not None
+        assert meta["stop_reason"] == "max_iterations"
+        assert meta["n_iterations"] >= 1
 
     def test_best_outputs_restored_after_loop(self, mock_pipeline):
         """output/ has best iteration's GeoTIFFs after loop ends."""

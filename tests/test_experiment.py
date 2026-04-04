@@ -11,14 +11,21 @@ import pytest
 from src.experiment import (
     DEFAULT_CONFIG,
     _deep_merge,
+    _flatten_dict,
+    _migrate_legacy_experiments,
+    _update_latest_symlink,
     compare_experiments,
+    create_session,
     get_next_iteration_number,
+    get_session_dir,
     list_iterations,
+    list_sessions,
     load_config,
     load_experiment,
     save_config,
     save_experiment,
     update_experiment_status,
+    update_session_meta,
     validate_config,
     validate_prerequisites,
 )
@@ -428,11 +435,19 @@ class TestValidatePrerequisites:
 class TestExperimentLedger:
     @pytest.fixture(autouse=True)
     def _setup_experiments_dir(self, tmp_path, monkeypatch):
-        """Point EXPERIMENTS_DIR to tmp_path for all ledger tests."""
+        """Point EXPERIMENTS_DIR to a session dir via symlink for all ledger tests."""
         import src.config as cfg_mod
 
-        self.experiments_dir = tmp_path / "experiments"
-        monkeypatch.setattr(cfg_mod, "EXPERIMENTS_DIR", self.experiments_dir)
+        base_dir = tmp_path / "experiments"
+        base_dir.mkdir()
+        session_dir = base_dir / "session_test"
+        session_dir.mkdir()
+        latest_link = base_dir / "latest"
+        latest_link.symlink_to(session_dir.name)
+
+        self.experiments_dir = latest_link
+        monkeypatch.setattr(cfg_mod, "EXPERIMENTS_BASE_DIR", base_dir)
+        monkeypatch.setattr(cfg_mod, "EXPERIMENTS_DIR", latest_link)
 
     def _sample_metrics(self, overall_acc=0.85):
         return {
@@ -454,14 +469,12 @@ class TestExperimentLedger:
 
     def test_get_next_iteration_sequential(self):
         """Returns N+1 after creating N iterations."""
-        self.experiments_dir.mkdir(parents=True)
         (self.experiments_dir / "iteration_001").mkdir()
         (self.experiments_dir / "iteration_002").mkdir()
         assert get_next_iteration_number() == 3
 
     def test_get_next_iteration_skips_corrupted(self):
         """Non-matching dirs ignored."""
-        self.experiments_dir.mkdir(parents=True)
         (self.experiments_dir / "iteration_001").mkdir()
         (self.experiments_dir / "not_an_iteration").mkdir()
         assert get_next_iteration_number() == 2
@@ -479,7 +492,6 @@ class TestExperimentLedger:
         """Existing dir raises RuntimeError."""
         metrics = self._sample_metrics()
         # Pre-create the directory that get_next_iteration_number will try to use
-        self.experiments_dir.mkdir(parents=True, exist_ok=True)
         (self.experiments_dir / "iteration_001").mkdir()
         # Monkeypatch get_next_iteration_number to always return 1 (collision)
         monkeypatch.setattr(
@@ -578,3 +590,255 @@ class TestExperimentLedger:
         save_config(default_config, config_path=path)
         loaded = load_config(config_path=path)
         assert loaded == default_config
+
+
+# ---------------------------------------------------------------------------
+# Session Management Tests
+# ---------------------------------------------------------------------------
+
+
+class TestSessionManagement:
+    @pytest.fixture(autouse=True)
+    def _setup_base_dir(self, tmp_path, monkeypatch):
+        """Point EXPERIMENTS_BASE_DIR and EXPERIMENTS_DIR to tmp_path."""
+        import src.config as cfg_mod
+
+        self.base_dir = tmp_path / "experiments"
+        monkeypatch.setattr(cfg_mod, "EXPERIMENTS_BASE_DIR", self.base_dir)
+        monkeypatch.setattr(cfg_mod, "EXPERIMENTS_DIR", self.base_dir / "latest")
+
+    def test_create_session_creates_dir_and_symlink(self, default_config):
+        """create_session creates session dir and latest/ symlink."""
+        session_dir = create_session(default_config)
+        assert session_dir.exists()
+        assert session_dir.name.startswith("session_")
+        latest = self.base_dir / "latest"
+        assert latest.is_symlink()
+        assert latest.resolve() == session_dir.resolve()
+
+    def test_create_session_writes_meta(self, default_config):
+        """session_meta.json created with correct fields."""
+        session_dir = create_session(default_config)
+        meta_path = session_dir / "session_meta.json"
+        assert meta_path.exists()
+        with open(meta_path) as f:
+            meta = json.load(f)
+        assert meta["session_id"] == session_dir.name
+        assert meta["start_time"] is not None
+        assert meta["end_time"] is None
+        assert meta["stop_reason"] is None
+        assert meta["parameter_count"] == len(_flatten_dict(default_config))
+        assert meta["n_iterations"] == 0
+
+    def test_create_session_preserves_previous(self, default_config):
+        """Multiple sessions preserved; latest symlink updated."""
+        import time
+        session_1 = create_session(default_config)
+        time.sleep(1.1)  # Ensure different timestamp
+        session_2 = create_session(default_config)
+        assert session_1.exists()
+        assert session_2.exists()
+        latest = self.base_dir / "latest"
+        assert latest.resolve() == session_2.resolve()
+
+    def test_update_latest_symlink_atomic(self, default_config):
+        """Symlink update is relative and atomic."""
+        session_dir = create_session(default_config)
+        # Verify symlink is relative
+        latest = self.base_dir / "latest"
+        target = Path(str(latest.parent / latest.readlink()))
+        assert target.name == session_dir.name
+
+    def test_list_sessions_returns_sorted(self, default_config):
+        """list_sessions returns sessions sorted by start_time descending."""
+        import time
+        create_session(default_config)
+        time.sleep(1.1)
+        create_session(default_config)
+        sessions = list_sessions()
+        assert len(sessions) == 2
+        # Most recent first
+        assert sessions[0]["start_time"] > sessions[1]["start_time"]
+
+    def test_list_sessions_skips_symlink(self, default_config):
+        """list_sessions does not include the latest/ symlink."""
+        create_session(default_config)
+        sessions = list_sessions()
+        session_ids = [s["session_id"] for s in sessions]
+        assert "latest" not in session_ids
+
+    def test_update_session_meta(self, default_config):
+        """update_session_meta merges updates into existing meta."""
+        session_dir = create_session(default_config)
+        update_session_meta(session_dir, {
+            "end_time": "2026-04-04T12:00:00+00:00",
+            "stop_reason": "max_iterations",
+            "n_iterations": 5,
+        })
+        with open(session_dir / "session_meta.json") as f:
+            meta = json.load(f)
+        assert meta["end_time"] == "2026-04-04T12:00:00+00:00"
+        assert meta["stop_reason"] == "max_iterations"
+        assert meta["n_iterations"] == 5
+        # Original fields preserved
+        assert meta["session_id"] == session_dir.name
+
+    def test_update_session_meta_missing_raises(self, tmp_path):
+        """FileNotFoundError when session_meta.json missing."""
+        with pytest.raises(FileNotFoundError):
+            update_session_meta(tmp_path, {"end_time": "now"})
+
+    def test_get_session_dir_none_returns_latest(self):
+        """get_session_dir(None) returns config.EXPERIMENTS_DIR."""
+        import src.config as cfg_mod
+        result = get_session_dir(None)
+        assert result == cfg_mod.EXPERIMENTS_DIR
+
+    def test_get_session_dir_by_id(self, default_config):
+        """get_session_dir(id) returns correct path."""
+        session_dir = create_session(default_config)
+        result = get_session_dir(session_dir.name)
+        assert result == session_dir
+
+    def test_get_session_dir_missing_raises(self):
+        """FileNotFoundError for non-existent session."""
+        self.base_dir.mkdir(parents=True, exist_ok=True)
+        with pytest.raises(FileNotFoundError):
+            get_session_dir("session_nonexistent")
+
+    def test_save_experiment_guard_no_symlink(self, default_config):
+        """save_experiment raises when latest/ symlink doesn't exist."""
+        # Don't create any session - latest/ doesn't exist
+        self.base_dir.mkdir(parents=True, exist_ok=True)
+        metrics = {"overall_accuracy": 0.85}
+        with pytest.raises(RuntimeError, match="does not exist"):
+            save_experiment(default_config, metrics)
+
+    def test_load_experiment_with_session_dir(self, default_config):
+        """load_experiment with session_dir loads from correct directory."""
+        session_dir = create_session(default_config)
+        # Create an iteration inside the session
+        iter_dir = session_dir / "iteration_001"
+        iter_dir.mkdir()
+        for fname, data in [
+            ("config.json", default_config),
+            ("metrics.json", {"overall_accuracy": 0.85}),
+            ("metadata.json", {"iteration": 1, "timestamp": "2026-04-04T12:00:00Z", "status": "accepted"}),
+        ]:
+            with open(iter_dir / fname, "w") as f:
+                json.dump(data, f)
+
+        # Load via explicit session_dir
+        result = load_experiment(1, session_dir=session_dir)
+        assert result["metrics"]["overall_accuracy"] == 0.85
+
+    def test_compare_experiments_with_session_dir(self, default_config):
+        """compare_experiments with session_dir works for non-latest sessions."""
+        session_dir = create_session(default_config)
+        cfg_a = copy.deepcopy(default_config)
+        cfg_b = copy.deepcopy(default_config)
+        cfg_b["training"]["n_estimators"] = 200
+
+        for num, cfg in [(1, cfg_a), (2, cfg_b)]:
+            iter_dir = session_dir / f"iteration_{num:03d}"
+            iter_dir.mkdir()
+            for fname, data in [
+                ("config.json", cfg),
+                ("metrics.json", {"overall_accuracy": 0.80 + num * 0.01}),
+                ("metadata.json", {"iteration": num, "timestamp": "2026-04-04T12:00:00Z", "status": "accepted"}),
+            ]:
+                with open(iter_dir / fname, "w") as f:
+                    json.dump(data, f)
+
+        result = compare_experiments(1, 2, session_dir=session_dir)
+        assert "training.n_estimators" in result["config_diff"]
+
+
+class TestLegacyMigration:
+    @pytest.fixture(autouse=True)
+    def _setup_base_dir(self, tmp_path, monkeypatch):
+        """Point config to tmp_path."""
+        import src.config as cfg_mod
+
+        self.base_dir = tmp_path / "experiments"
+        monkeypatch.setattr(cfg_mod, "EXPERIMENTS_BASE_DIR", self.base_dir)
+        monkeypatch.setattr(cfg_mod, "EXPERIMENTS_DIR", self.base_dir / "latest")
+
+    def test_migrates_flat_iterations(self):
+        """Flat iteration_NNN/ dirs moved to session_legacy/."""
+        self.base_dir.mkdir()
+        # Create flat iteration dirs
+        for i in range(1, 4):
+            iter_dir = self.base_dir / f"iteration_{i:03d}"
+            iter_dir.mkdir()
+            with open(iter_dir / "metadata.json", "w") as f:
+                json.dump({"iteration": i, "timestamp": f"2026-04-0{i}T12:00:00Z", "status": "accepted"}, f)
+            with open(iter_dir / "metrics.json", "w") as f:
+                json.dump({"overall_accuracy": 0.7 + i * 0.01}, f)
+
+        # Create SUMMARY.md
+        (self.base_dir / "SUMMARY.md").write_text("# Summary")
+
+        _migrate_legacy_experiments(self.base_dir)
+
+        legacy = self.base_dir / "session_legacy"
+        assert legacy.exists()
+        assert (legacy / "iteration_001").exists()
+        assert (legacy / "iteration_002").exists()
+        assert (legacy / "iteration_003").exists()
+        assert (legacy / "SUMMARY.md").exists()
+        assert not (self.base_dir / "iteration_001").exists()
+
+    def test_creates_session_meta_for_legacy(self):
+        """session_meta.json created with best iteration data."""
+        self.base_dir.mkdir()
+        for i in range(1, 3):
+            iter_dir = self.base_dir / f"iteration_{i:03d}"
+            iter_dir.mkdir()
+            with open(iter_dir / "metadata.json", "w") as f:
+                json.dump({"iteration": i, "timestamp": f"2026-04-0{i}T12:00:00Z", "status": "accepted"}, f)
+            with open(iter_dir / "metrics.json", "w") as f:
+                json.dump({"overall_accuracy": 0.7 + i * 0.05}, f)
+
+        _migrate_legacy_experiments(self.base_dir)
+
+        meta_path = self.base_dir / "session_legacy" / "session_meta.json"
+        assert meta_path.exists()
+        with open(meta_path) as f:
+            meta = json.load(f)
+        assert meta["session_id"] == "session_legacy"
+        assert meta["n_iterations"] == 2
+        assert meta["best_iteration"] == 2
+        assert meta["stop_reason"] == "migrated_from_flat"
+
+    def test_migration_idempotent(self):
+        """Second migration call is a no-op."""
+        self.base_dir.mkdir()
+        (self.base_dir / "iteration_001").mkdir()
+        with open(self.base_dir / "iteration_001" / "metadata.json", "w") as f:
+            json.dump({"iteration": 1, "timestamp": "2026-04-01T12:00:00Z"}, f)
+
+        _migrate_legacy_experiments(self.base_dir)
+        # session_legacy now exists; second call should be no-op
+        _migrate_legacy_experiments(self.base_dir)
+        assert (self.base_dir / "session_legacy").exists()
+
+    def test_no_migration_when_no_flat_iters(self):
+        """No migration when no iteration_* dirs exist."""
+        self.base_dir.mkdir()
+        _migrate_legacy_experiments(self.base_dir)
+        assert not (self.base_dir / "session_legacy").exists()
+
+    def test_legacy_visible_in_list_sessions(self):
+        """session_legacy appears in list_sessions() after migration."""
+        self.base_dir.mkdir()
+        iter_dir = self.base_dir / "iteration_001"
+        iter_dir.mkdir()
+        with open(iter_dir / "metadata.json", "w") as f:
+            json.dump({"iteration": 1, "timestamp": "2026-04-01T12:00:00Z"}, f)
+        with open(iter_dir / "metrics.json", "w") as f:
+            json.dump({"overall_accuracy": 0.75}, f)
+
+        sessions = list_sessions()  # Triggers migration
+        session_ids = [s["session_id"] for s in sessions]
+        assert "session_legacy" in session_ids

@@ -461,6 +461,13 @@ def save_experiment(cfg: dict, metrics: dict, status: str = "pending") -> tuple[
     import copy
     import datetime
 
+    experiments_dir = config.EXPERIMENTS_DIR
+    if not experiments_dir.exists() and not experiments_dir.is_symlink():
+        raise RuntimeError(
+            f"Experiments directory {experiments_dir} does not exist. "
+            f"Call create_session() before saving experiments."
+        )
+
     iteration_num = get_next_iteration_number()
     iteration_dir = config.EXPERIMENTS_DIR / f"iteration_{iteration_num:03d}"
 
@@ -499,15 +506,20 @@ def save_experiment(cfg: dict, metrics: dict, status: str = "pending") -> tuple[
     return iteration_dir, iteration_num
 
 
-def load_experiment(iteration: int) -> dict:
+def load_experiment(iteration: int, session_dir: Path | None = None) -> dict:
     """Load an experiment's config, metrics, and metadata.
+
+    Args:
+        iteration: Iteration number to load.
+        session_dir: Session directory to load from. Defaults to config.EXPERIMENTS_DIR.
 
     Returns {"config": ..., "metrics": ..., "metadata": ...}.
     Raises FileNotFoundError if the iteration directory or any file is missing.
     """
     import json
 
-    iteration_dir = config.EXPERIMENTS_DIR / f"iteration_{iteration:03d}"
+    experiments_dir = session_dir or config.EXPERIMENTS_DIR
+    iteration_dir = experiments_dir / f"iteration_{iteration:03d}"
     if not iteration_dir.exists():
         raise FileNotFoundError(
             f"Experiment iteration_{iteration:03d} not found at {iteration_dir}"
@@ -591,13 +603,283 @@ def _flatten_dict(d: dict, prefix: str = "") -> dict:
     return flat
 
 
-def compare_experiments(iter_a: int, iter_b: int) -> dict:
+# ---------------------------------------------------------------------------
+# Session Management
+# ---------------------------------------------------------------------------
+
+
+def _update_latest_symlink(base_dir: Path, session_dir: Path) -> None:
+    """Atomically update the latest/ symlink to point to session_dir.
+
+    Uses a temporary symlink + rename for atomicity on POSIX systems.
+    The symlink target is relative (just the directory name) for portability.
+    """
+    import os
+
+    symlink_path = base_dir / "latest"
+
+    # Atomic symlink update: create temp symlink, then rename over target
+    tmp_link = base_dir / f".latest_tmp_{os.getpid()}"
+    if tmp_link.is_symlink() or tmp_link.exists():
+        tmp_link.unlink()
+    tmp_link.symlink_to(session_dir.name)  # Relative symlink
+    tmp_link.rename(symlink_path)
+
+
+def _migrate_legacy_experiments(base_dir: Path) -> None:
+    """Migrate flat iteration_NNN/ dirs from experiments/ root to experiments/session_legacy/.
+
+    This is a one-time migration. If experiments/session_legacy/ already exists,
+    or no flat iteration dirs are found, this is a no-op.
+    """
+    import shutil
+    import json
+    import datetime
+
+    legacy_dir = base_dir / "session_legacy"
+    if legacy_dir.exists():
+        return  # Already migrated
+
+    # Check for flat iteration dirs in experiments/ root
+    flat_iters = sorted(
+        entry for entry in base_dir.iterdir()
+        if entry.is_dir() and entry.name.startswith("iteration_")
+    )
+    if not flat_iters:
+        return  # Nothing to migrate
+
+    print(f"[experiment] Migrating {len(flat_iters)} legacy iterations...")
+    legacy_dir.mkdir()
+
+    for iter_dir in flat_iters:
+        dst = legacy_dir / iter_dir.name
+        shutil.move(str(iter_dir), str(dst))
+        print(f"[experiment]   Moved {iter_dir.name} -> session_legacy/{iter_dir.name}")
+
+    # Move SUMMARY.md if present
+    summary_path = base_dir / "SUMMARY.md"
+    if summary_path.exists():
+        shutil.move(str(summary_path), str(legacy_dir / "SUMMARY.md"))
+
+    # Create session_meta.json for the legacy session
+    earliest_time = None
+    latest_time = None
+    n_iters = len(flat_iters)
+    best_iter = None
+    best_acc = -1.0
+
+    for iter_dir_entry in sorted(legacy_dir.iterdir()):
+        if not iter_dir_entry.is_dir() or not iter_dir_entry.name.startswith("iteration_"):
+            continue
+        meta_path = iter_dir_entry / "metadata.json"
+        if meta_path.exists():
+            with open(meta_path) as f:
+                meta = json.load(f)
+            ts = meta.get("timestamp", "")
+            if ts:
+                if earliest_time is None or ts < earliest_time:
+                    earliest_time = ts
+                if latest_time is None or ts > latest_time:
+                    latest_time = ts
+        metrics_path = iter_dir_entry / "metrics.json"
+        if metrics_path.exists():
+            with open(metrics_path) as f:
+                metrics = json.load(f)
+            acc = metrics.get("overall_accuracy", 0)
+            if acc > best_acc:
+                best_acc = acc
+                suffix = iter_dir_entry.name[len("iteration_"):]
+                try:
+                    best_iter = int(suffix)
+                except ValueError:
+                    pass
+
+    legacy_meta = {
+        "session_id": "session_legacy",
+        "start_time": earliest_time or "",
+        "end_time": latest_time,
+        "stop_reason": "migrated_from_flat",
+        "best_iteration": best_iter,
+        "final_score": best_acc if best_acc > 0 else None,
+        "initial_config": None,
+        "parameter_count": None,
+        "n_iterations": n_iters,
+    }
+
+    meta_path = legacy_dir / "session_meta.json"
+    tmp_path = meta_path.with_suffix(".json.tmp")
+    with open(tmp_path, "w") as f:
+        json.dump(legacy_meta, f, indent=2, default=str)
+        f.write("\n")
+    tmp_path.rename(meta_path)
+
+    print(f"[experiment] Legacy migration complete: {n_iters} iterations")
+
+
+def create_session(initial_config: dict) -> Path:
+    """Create a new session directory and update the latest/ symlink.
+
+    Creates experiments/session_YYYYMMDD_HHMMSS/ with session_meta.json.
+    Updates experiments/latest/ symlink to point to the new session.
+    Triggers legacy migration on first call if needed.
+
+    Returns the session directory Path.
+    """
+    import datetime
+    import json
+    import copy
+
+    base_dir = config.EXPERIMENTS_BASE_DIR
+    base_dir.mkdir(parents=True, exist_ok=True)
+
+    # Migrate legacy flat iterations if present (one-time, best-effort)
+    try:
+        _migrate_legacy_experiments(base_dir)
+    except Exception as e:
+        print(f"[experiment] WARNING: Legacy migration failed: {e}")
+        print("[experiment] Continuing with session creation.")
+
+    now = datetime.datetime.now(datetime.timezone.utc)
+    session_id = f"session_{now.strftime('%Y%m%d_%H%M%S')}"
+    session_dir = base_dir / session_id
+    session_dir.mkdir(exist_ok=False)
+
+    meta = {
+        "session_id": session_id,
+        "start_time": now.isoformat(),
+        "end_time": None,
+        "stop_reason": None,
+        "best_iteration": None,
+        "final_score": None,
+        "initial_config": copy.deepcopy(initial_config),
+        "parameter_count": len(_flatten_dict(initial_config)),
+        "n_iterations": 0,
+    }
+
+    meta_path = session_dir / "session_meta.json"
+    tmp_path = meta_path.with_suffix(".json.tmp")
+    with open(tmp_path, "w") as f:
+        json.dump(meta, f, indent=2, default=str)
+        f.write("\n")
+    tmp_path.rename(meta_path)
+
+    _update_latest_symlink(base_dir, session_dir)
+
+    print(f"[experiment] Created session: {session_id}")
+    return session_dir
+
+
+def list_sessions() -> list[dict]:
+    """List all experiment sessions sorted by date (most recent first).
+
+    Returns list of dicts with: session_id, start_time, end_time,
+    stop_reason, best_iteration, final_score, n_iterations, path.
+
+    Also triggers legacy migration if flat iteration dirs are found.
+    """
+    import json
+
+    base_dir = config.EXPERIMENTS_BASE_DIR
+    if not base_dir.exists():
+        return []
+
+    # Trigger migration if legacy dirs exist (so UI works before autocorrect)
+    try:
+        _migrate_legacy_experiments(base_dir)
+    except Exception:
+        pass  # Best effort
+
+    sessions = []
+    for entry in sorted(base_dir.iterdir(), reverse=True):
+        if not entry.is_dir() or not entry.name.startswith("session_"):
+            continue
+        if entry.is_symlink():
+            continue  # Skip latest/ symlink
+
+        meta_path = entry / "session_meta.json"
+        if not meta_path.exists():
+            sessions.append({
+                "session_id": entry.name,
+                "start_time": "",
+                "end_time": None,
+                "stop_reason": None,
+                "best_iteration": None,
+                "final_score": None,
+                "n_iterations": 0,
+                "path": entry,
+            })
+            continue
+
+        with open(meta_path) as f:
+            meta = json.load(f)
+
+        sessions.append({
+            "session_id": meta.get("session_id", entry.name),
+            "start_time": meta.get("start_time", ""),
+            "end_time": meta.get("end_time"),
+            "stop_reason": meta.get("stop_reason"),
+            "best_iteration": meta.get("best_iteration"),
+            "final_score": meta.get("final_score"),
+            "n_iterations": meta.get("n_iterations", 0),
+            "path": entry,
+        })
+
+    sessions.sort(key=lambda s: s["start_time"], reverse=True)
+    return sessions
+
+
+def update_session_meta(session_dir: Path, updates: dict) -> None:
+    """Update session_meta.json with new values.
+
+    Args:
+        session_dir: Path to the session directory.
+        updates: Dict of fields to update (merged into existing meta).
+    """
+    import json
+
+    meta_path = session_dir / "session_meta.json"
+    if not meta_path.exists():
+        raise FileNotFoundError(f"session_meta.json not found in {session_dir}")
+
+    with open(meta_path) as f:
+        meta = json.load(f)
+
+    meta.update(updates)
+
+    tmp_path = meta_path.with_suffix(".json.tmp")
+    with open(tmp_path, "w") as f:
+        json.dump(meta, f, indent=2, default=str)
+        f.write("\n")
+    tmp_path.rename(meta_path)
+
+
+def get_session_dir(session_id: str | None = None) -> Path:
+    """Get the directory for a session by ID.
+
+    If session_id is None, returns the latest session path (via symlink).
+    Raises FileNotFoundError if the session does not exist.
+    """
+    if session_id is None:
+        return config.EXPERIMENTS_DIR  # latest/ symlink
+
+    session_dir = config.EXPERIMENTS_BASE_DIR / session_id
+    if not session_dir.exists():
+        raise FileNotFoundError(f"Session {session_id!r} not found at {session_dir}")
+    return session_dir
+
+
+def compare_experiments(iter_a: int, iter_b: int, session_dir: Path | None = None) -> dict:
     """Compare two experiments, showing config diffs and metric deltas.
+
+    Args:
+        iter_a: First iteration number.
+        iter_b: Second iteration number.
+        session_dir: Session directory to load from. Defaults to config.EXPERIMENTS_DIR.
 
     Returns dict with config_diff and metrics_diff.
     """
-    exp_a = load_experiment(iter_a)
-    exp_b = load_experiment(iter_b)
+    exp_a = load_experiment(iter_a, session_dir=session_dir)
+    exp_b = load_experiment(iter_b, session_dir=session_dir)
 
     # Flatten configs for comparison
     flat_a = _flatten_dict(exp_a["config"])

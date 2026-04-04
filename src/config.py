@@ -144,7 +144,8 @@ EMBEDDINGS_DIR: Path = OUTPUT_DIR / "embeddings"
 # ---------------------------------------------------------------------------
 # Experiment Tracking
 # ---------------------------------------------------------------------------
-EXPERIMENTS_DIR: Path = PROJECT_ROOT / "experiments"
+EXPERIMENTS_BASE_DIR: Path = PROJECT_ROOT / "experiments"
+EXPERIMENTS_DIR: Path = EXPERIMENTS_BASE_DIR / "latest"
 
 # ---------------------------------------------------------------------------
 # Evaluation Pipeline (Issue 6)
