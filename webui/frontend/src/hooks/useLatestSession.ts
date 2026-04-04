@@ -20,6 +20,8 @@ interface SessionStateInternal {
 export interface SessionState extends SessionStateInternal {
   /** Call to update the displayed iteration (e.g., on SSE event) */
   refreshIteration: (sessionId: string, iterationNum: number) => void;
+  /** Call to retry the initial session fetch after an error */
+  retry: () => void;
 }
 
 /**
@@ -27,6 +29,7 @@ export interface SessionState extends SessionStateInternal {
  * then resolves tile URL templates for each overlay layer.
  */
 export function useLatestSession(): SessionState {
+  const [retryCount, setRetryCount] = useState(0);
   const [state, setState] = useState<SessionStateInternal>({
     loading: true,
     error: null,
@@ -127,7 +130,7 @@ export function useLatestSession(): SessionState {
 
     resolve();
     return () => { cancelled = true; };
-  }, []);
+  }, [retryCount]);
 
   const refreshIteration = useCallback(
     (newSessionId: string, newIterationNum: number) => {
@@ -158,5 +161,7 @@ export function useLatestSession(): SessionState {
     [],
   );
 
-  return { ...state, refreshIteration };
+  const retry = useCallback(() => setRetryCount(c => c + 1), []);
+
+  return { ...state, refreshIteration, retry };
 }

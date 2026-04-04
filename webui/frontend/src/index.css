@@ -73,3 +73,30 @@
 .animate-fade-in-up {
   animation: fade-in-up 0.3s ease-out;
 }
+
+/* MapLibre popup dark mode overrides */
+.dark .maplibregl-popup-content {
+  background: hsl(var(--background));
+  color: hsl(var(--foreground));
+}
+.dark .maplibregl-popup-tip {
+  border-top-color: hsl(var(--background));
+}
+.dark .maplibregl-popup-close-button {
+  color: hsl(var(--foreground));
+}
+
+/* MapLibre controls dark mode overrides */
+.dark .maplibregl-ctrl-group {
+  background: hsl(var(--background));
+  border-color: hsl(var(--border));
+}
+.dark .maplibregl-ctrl-group button {
+  background-color: transparent;
+}
+.dark .maplibregl-ctrl-group button + button {
+  border-top-color: hsl(var(--border));
+}
+.dark .maplibregl-ctrl-group button .maplibregl-ctrl-icon {
+  filter: invert(1);
+}

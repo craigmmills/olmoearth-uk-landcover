@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { ChevronRight, ChevronLeft } from 'lucide-react';
+import { ChevronRight, ChevronLeft, Download } from 'lucide-react';
 import { listIterations } from '@/api/client';
 import { SessionSelector } from '@/components/SessionSelector';
 import { SummaryStats } from '@/components/SummaryStats';
@@ -34,13 +34,27 @@ function DashboardSkeleton() {
   );
 }
 
-export function ExperimentDashboard() {
+interface ExperimentDashboardProps {
+  panelOpen?: boolean;
+  onOpenChange?: (open: boolean) => void;
+  onSessionChange?: (sessionId: string) => void;
+}
+
+export function ExperimentDashboard({
+  panelOpen: controlledPanelOpen,
+  onOpenChange: controlledOnOpenChange,
+  onSessionChange,
+}: ExperimentDashboardProps) {
+  // Internal state as fallback when not controlled
+  const [internalPanelOpen, setInternalPanelOpen] = useState(true);
+  const panelOpen = controlledPanelOpen ?? internalPanelOpen;
+  const onOpenChange = controlledOnOpenChange ?? setInternalPanelOpen;
+
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
   const [iterations, setIterations] = useState<IterationSummary[]>([]);
   const [bestIteration, setBestIteration] = useState<number | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [panelOpen, setPanelOpen] = useState(true);
   const [expandedItems, setExpandedItems] = useState<string[]>([]);
   const abortRef = useRef<AbortController | null>(null);
 
@@ -126,32 +140,60 @@ export function ExperimentDashboard() {
 
   useSessionSSE({ onNewIteration: handleNewIteration });
 
-  // We need the session summary to pass bestIteration from the session metadata.
-  // Since SessionSelector internally fetches sessions, we also listen for
-  // the selected session ID change and find the matching session's best_iteration.
-  // For now, we determine best from the iterations list above.
-
   const handleSessionChange = useCallback((sessionId: string) => {
     setSelectedSessionId(sessionId);
-  }, []);
+    onSessionChange?.(sessionId);
+  }, [onSessionChange]);
+
+  // CSV export handler
+  const handleExportCSV = useCallback(() => {
+    if (iterations.length === 0) return;
+
+    const header = 'iteration,timestamp,status,overall_accuracy\n';
+    const rows = iterations
+      .map(it => `${it.iteration},${it.timestamp},${it.status},${it.overall_accuracy ?? ''}`)
+      .join('\n');
+
+    const blob = new Blob([header + rows], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.download = `iterations-${selectedSessionId ?? 'data'}.csv`;
+    link.href = url;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  }, [iterations, selectedSessionId]);
 
   return (
-    <Collapsible open={panelOpen} onOpenChange={setPanelOpen}>
+    <Collapsible open={panelOpen} onOpenChange={onOpenChange}>
       {/* Collapse/expand toggle bar */}
       <div className="flex items-center justify-between mb-3">
         <h2 className="text-lg font-semibold">Experiment Dashboard</h2>
-        <CollapsibleTrigger asChild>
-          <button
-            className="rounded-md p-1 hover:bg-accent"
-            aria-label={panelOpen ? 'Collapse dashboard' : 'Expand dashboard'}
-          >
-            {panelOpen ? (
-              <ChevronLeft className="h-5 w-5" />
-            ) : (
-              <ChevronRight className="h-5 w-5" />
-            )}
-          </button>
-        </CollapsibleTrigger>
+        <div className="flex items-center gap-1">
+          {iterations.length > 0 && (
+            <button
+              onClick={handleExportCSV}
+              className="rounded-md p-1 hover:bg-accent"
+              aria-label="Export iterations as CSV"
+              title="Export CSV"
+            >
+              <Download className="h-4 w-4" />
+            </button>
+          )}
+          <CollapsibleTrigger asChild>
+            <button
+              className="rounded-md p-1 hover:bg-accent"
+              aria-label={panelOpen ? 'Collapse dashboard' : 'Expand dashboard'}
+            >
+              {panelOpen ? (
+                <ChevronLeft className="h-5 w-5" />
+              ) : (
+                <ChevronRight className="h-5 w-5" />
+              )}
+            </button>
+          </CollapsibleTrigger>
+        </div>
       </div>
 
       <CollapsibleContent>

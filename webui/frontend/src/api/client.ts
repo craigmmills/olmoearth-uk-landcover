@@ -104,3 +104,27 @@ export function deriveChangeMapCogPath(
 export function buildWorldCoverTileUrl(): string {
   return `${API_BASE_URL}/api/worldcover/tiles/{z}/{x}/{y}.png`;
 }
+
+// --- Click-to-Query (Issue #26) ---
+
+export interface PointQueryResponse {
+  lng: number;
+  lat: number;
+  class_index: number;
+  class_name: string;
+  color: string;
+}
+
+export async function queryPoint(
+  sessionId: string,
+  iterationNum: number,
+  year: '2021' | '2023',
+  lng: number,
+  lat: number,
+  signal?: AbortSignal,
+): Promise<PointQueryResponse> {
+  return fetchJson<PointQueryResponse>(
+    `/api/sessions/${sessionId}/iterations/${iterationNum}/point/${year}?lng=${lng}&lat=${lat}`,
+    { signal },
+  );
+}

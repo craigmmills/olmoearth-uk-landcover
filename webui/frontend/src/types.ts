@@ -161,3 +161,17 @@ export type LoopStatus =
   | { state: 'complete'; sessionId: string; nIterations: number; bestScore: number | null; stopReason: string }
   | { state: 'idle' }
   | { state: 'error'; message: string };
+
+// --- Click-to-Query (Issue #26) ---
+
+/** Result from clicking a map pixel. */
+export interface PixelQueryResult {
+  lng: number;
+  lat: number;
+  classIndex: number;
+  className: string;
+  color: string;
+}
+
+// --- Theme (Issue #26) ---
+export type Theme = 'dark' | 'light';

@@ -16,7 +16,7 @@ import os
 import re
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict
@@ -104,6 +104,18 @@ class IterationDetail(BaseModel):
     images: dict[str, str | None] = {}
     config_diff: dict | None = None
     metrics_diff: dict | None = None
+
+
+class PointQueryResult(BaseModel):
+    """Response model for GET /api/sessions/{id}/iterations/{num}/point/{year}."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    lng: float
+    lat: float
+    class_index: int
+    class_name: str
+    color: str
 
 
 class SSEEvent(BaseModel):
@@ -535,6 +547,71 @@ def get_worldcover_tile(z: int, x: int, y: int) -> Response:
     image = tile.render(colormap=LANDCOVER_CMAP)
 
     return Response(content=image, media_type="image/png")
+
+
+# ---------------------------------------------------------------------------
+# Point Query Endpoint (Click-to-Query)
+# ---------------------------------------------------------------------------
+
+
+@app.get(
+    "/api/sessions/{session_id}/iterations/{iteration_num}/point/{year}",
+    response_model=PointQueryResult,
+)
+def query_point(
+    session_id: str,
+    iteration_num: int,
+    year: str,
+    lng: float = Query(..., description="Longitude (WGS84)"),
+    lat: float = Query(..., description="Latitude (WGS84)"),
+) -> dict:
+    """Query the pixel value at a geographic coordinate.
+
+    Returns the landcover class index, name, and color for the pixel at the
+    given lng/lat coordinate in the specified year's classification raster.
+    """
+    from rio_tiler.io import Reader
+    from src.experiment import get_session_dir
+    from webui.backend.cog import ensure_cog
+    from src import config
+
+    _validate_session_id(session_id)
+    _validate_iteration_num(iteration_num)
+    if year not in ("2021", "2023"):
+        raise HTTPException(status_code=400, detail=f"Invalid year: {year!r}")
+
+    try:
+        session_dir = get_session_dir(session_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"Session {session_id!r} not found")
+
+    tif_path = session_dir / f"iteration_{iteration_num:03d}" / f"landcover_{year}.tif"
+    if not tif_path.exists():
+        raise HTTPException(status_code=404, detail=f"GeoTIFF not found for {year}")
+
+    cog_path = ensure_cog(tif_path)
+
+    try:
+        with Reader(str(cog_path)) as reader:
+            point_data = reader.point(lng, lat, indexes=(1,))
+    except Exception as exc:
+        print(f"[backend] ERROR: point query failed at ({lng}, {lat}): {exc}")
+        raise HTTPException(
+            status_code=400,
+            detail="Coordinates outside raster bounds or query failed",
+        )
+
+    class_index = int(point_data.data[0])
+    class_name = config.LANDCOVER_CLASSES.get(class_index, f"Unknown ({class_index})")
+    hex_color = config.LANDCOVER_COLORS.get(class_index, "#000000")
+
+    return {
+        "lng": lng,
+        "lat": lat,
+        "class_index": class_index,
+        "class_name": class_name,
+        "color": hex_color,
+    }
 
 
 # ---------------------------------------------------------------------------
