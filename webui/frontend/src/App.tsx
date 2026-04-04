@@ -1,6 +1,7 @@
 import { useState, useCallback } from 'react';
 import MapView from '@/components/MapView';
 import ControlPanel from '@/components/ControlPanel';
+import { ExperimentDashboard } from '@/components/ExperimentDashboard';
 import { useLatestSession } from '@/hooks/useLatestSession';
 import { useBackendHealth } from '@/hooks/useBackendHealth';
 import type { LayerState, BasemapType } from '@/types';
@@ -54,8 +55,8 @@ export default function App() {
         <MapView basemap={basemap} layers={layers} />
       </div>
 
-      {/* Control Panel -- 30% width */}
-      <div className="flex-[3] border-l overflow-y-auto bg-background p-4">
+      {/* Side Panel -- 30% width */}
+      <div className="flex-[3] border-l overflow-y-auto bg-background p-4 space-y-6">
         <ControlPanel
           basemap={basemap}
           onBasemapChange={setBasemap}
@@ -66,6 +67,11 @@ export default function App() {
           loading={loading}
           error={error}
         />
+
+        {/* Experiment Dashboard */}
+        <div className="border-t pt-4">
+          <ExperimentDashboard />
+        </div>
       </div>
     </div>
   );

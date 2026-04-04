@@ -45,3 +45,87 @@ export interface LayerState {
 }
 
 export type BasemapType = 'osm' | 'satellite';
+
+// --- Dashboard types (Issue #23) ---
+
+/** Typed per-class metrics from metrics.json */
+export interface PerClassMetrics {
+  precision: number;
+  recall: number;
+  f1: number;
+  support: number;
+}
+
+/** Typed metrics structure from metrics.json */
+export interface Metrics {
+  overall_accuracy: number;
+  evaluation_year?: string;
+  per_class: Record<string, PerClassMetrics>;
+  weighted_avg: { precision: number; recall: number; f1: number };
+  training_accuracy?: number;
+  n_training_samples?: number;
+}
+
+/** Gemini evaluation per-class entry */
+export interface EvalPerClass {
+  class_name: string;
+  score: number;
+  notes: string;
+}
+
+/** Gemini evaluation error region */
+export interface ErrorRegion {
+  location: string;
+  expected: string;
+  predicted: string;
+  severity: 'high' | 'medium' | 'low';
+}
+
+/** Gemini evaluation data (nested under evaluation key) */
+export interface EvaluationData {
+  overall_score: number;
+  per_class: EvalPerClass[];
+  error_regions: ErrorRegion[];
+  spatial_quality: string;
+  confidence: number;
+  recommendations: string[];
+}
+
+/** Full evaluation JSON structure (evaluation_YYYY.json) */
+export interface Evaluation {
+  year: string;
+  timestamp: string;
+  model: string;
+  evaluation: EvaluationData;
+  summary: {
+    overall_score: number;
+    confidence: number;
+    num_error_regions: number;
+    num_recommendations: number;
+  };
+}
+
+/** Hypothesis JSON structure */
+export interface Hypothesis {
+  hypothesis: string;
+  component: string;
+  parameter_changes: Record<string, unknown>;
+  expected_impact: string;
+  risk?: string;
+  tier?: number;
+  confidence?: number;
+  reasoning?: string;
+  source?: string;
+}
+
+/** Config diff entry: { a: old_val, b: new_val } */
+export interface ConfigDiffEntry {
+  a: unknown;
+  b: unknown;
+}
+
+/** Metrics diff structure */
+export interface MetricsDiff {
+  overall_accuracy: { a: number; b: number; delta: number };
+  per_class: Record<string, { f1: { a: number; b: number; delta: number } }>;
+}

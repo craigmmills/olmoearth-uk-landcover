@@ -1,5 +1,5 @@
 import { API_BASE_URL } from '@/constants';
-import type { SessionSummary, IterationSummary } from '@/types';
+import type { SessionSummary, IterationSummary, IterationDetail } from '@/types';
 
 export class ApiError extends Error {
   status: number;
@@ -11,8 +11,8 @@ export class ApiError extends Error {
   }
 }
 
-async function fetchJson<T>(path: string): Promise<T> {
-  const res = await fetch(`${API_BASE_URL}${path}`);
+async function fetchJson<T>(path: string, init?: RequestInit): Promise<T> {
+  const res = await fetch(`${API_BASE_URL}${path}`, init);
   if (!res.ok) {
     throw new ApiError(res.status, `${res.status}: ${res.statusText}`);
   }
@@ -32,8 +32,29 @@ export async function listSessions(): Promise<SessionSummary[]> {
   return fetchJson<SessionSummary[]>('/api/sessions');
 }
 
-export async function listIterations(sessionId: string): Promise<IterationSummary[]> {
-  return fetchJson<IterationSummary[]>(`/api/sessions/${sessionId}/iterations`);
+export async function listIterations(
+  sessionId: string,
+  signal?: AbortSignal,
+): Promise<IterationSummary[]> {
+  return fetchJson<IterationSummary[]>(
+    `/api/sessions/${sessionId}/iterations`,
+    { signal },
+  );
+}
+
+/**
+ * Fetch full detail for a single iteration.
+ * Used by IterationCard on expand.
+ */
+export async function getIterationDetail(
+  sessionId: string,
+  iterationNum: number,
+  signal?: AbortSignal,
+): Promise<IterationDetail> {
+  return fetchJson<IterationDetail>(
+    `/api/sessions/${sessionId}/iterations/${iterationNum}`,
+    { signal },
+  );
 }
 
 /**
