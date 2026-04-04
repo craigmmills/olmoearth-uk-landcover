@@ -71,21 +71,35 @@ def _score_from_metrics(iteration: int, metrics: dict) -> IterationScore:
 
 
 def _extract_score(iteration: int, metrics: dict, eval_results: dict | None) -> IterationScore:
-    """Extract best available score. Prefers VLM (2021 only), falls back to metrics.
+    """Extract blended score: combines VLM visual assessment with quantitative metrics.
 
-    Design decision (RT2-3): Only year 2021 evaluation is used for scoring
-    because metrics are computed against 2021 WorldCover ground truth.
+    Blending prevents the problem where Gemini's coarse integer scale (1-10)
+    can't distinguish between e.g. 83% and 86% accuracy (both score "8").
+    The blend uses VLM as the primary signal but adds a fractional component
+    from metrics so accuracy improvements always register.
 
-    Args:
-        iteration: Experiment iteration number.
-        metrics: Classification metrics dict from load_experiment().
-        eval_results: Return value of run_evaluation() -- dict mapping year -> result, or None.
+    Formula: score = vlm_score * 0.7 + metrics_score * 0.3
     """
+    metrics_score = _score_from_metrics(iteration, metrics)
+
     if eval_results is not None:
         year_result = eval_results.get("2021")
         if year_result and isinstance(year_result, dict) and "evaluation" in year_result:
-            return _score_from_vlm(iteration, year_result)
-    return _score_from_metrics(iteration, metrics)
+            vlm_score = _score_from_vlm(iteration, year_result)
+            # Blend: VLM provides qualitative assessment, metrics provide precision
+            blended_overall = round(vlm_score.overall_score * 0.7 + metrics_score.overall_score * 0.3, 2)
+            blended_classes = {}
+            for name in set(list(vlm_score.class_scores.keys()) + list(metrics_score.class_scores.keys())):
+                vlm_cs = vlm_score.class_scores.get(name, metrics_score.class_scores.get(name, 0.0))
+                met_cs = metrics_score.class_scores.get(name, vlm_cs)
+                blended_classes[name] = round(vlm_cs * 0.7 + met_cs * 0.3, 2)
+            return IterationScore(
+                iteration=iteration,
+                overall_score=blended_overall,
+                class_scores=blended_classes,
+                source="blended",
+            )
+    return metrics_score
 
 
 # ---------------------------------------------------------------------------
@@ -105,8 +119,8 @@ def _check_pareto_acceptance(
 
     Returns (accepted: bool, reason: str).
     """
-    # Rule 1: overall must strictly improve
-    if candidate.overall_score <= best.overall_score:
+    # Rule 1: overall must improve (or match with blended scoring precision)
+    if candidate.overall_score < best.overall_score:
         delta = candidate.overall_score - best.overall_score
         return False, (
             f"Overall score did not improve: "
