@@ -8,8 +8,6 @@ import { Skeleton } from '@/components/ui/skeleton';
 import {
   Accordion,
   AccordionItem,
-  AccordionTrigger,
-  AccordionContent,
 } from '@/components/ui/accordion';
 import {
   Collapsible,
@@ -231,12 +229,6 @@ export function ExperimentDashboard({
                 const isBest = iteration.iteration === bestIteration;
                 const isExpanded = expandedItems.includes(itemId);
                 const isNewest = index === iterations.length - 1;
-                const { summaryContent, detailContent } = IterationCard({
-                  sessionId: selectedSessionId!,
-                  iteration,
-                  isBest,
-                  isExpanded,
-                });
 
                 return (
                   <AccordionItem
@@ -244,12 +236,12 @@ export function ExperimentDashboard({
                     value={itemId}
                     className={`${isBest ? 'border-amber-400 bg-amber-50/50' : ''} ${isNewest ? 'animate-fade-in-up' : ''}`}
                   >
-                    <AccordionTrigger className="hover:no-underline px-2">
-                      {summaryContent}
-                    </AccordionTrigger>
-                    <AccordionContent className="px-2">
-                      {detailContent}
-                    </AccordionContent>
+                    <IterationCard
+                      sessionId={selectedSessionId!}
+                      iteration={iteration}
+                      isBest={isBest}
+                      isExpanded={isExpanded}
+                    />
                   </AccordionItem>
                 );
               })}

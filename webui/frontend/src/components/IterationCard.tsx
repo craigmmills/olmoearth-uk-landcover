@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { getIterationDetail } from '@/api/client';
+import { AccordionTrigger, AccordionContent } from '@/components/ui/accordion';
 import { Badge } from '@/components/ui/badge';
 import { Skeleton } from '@/components/ui/skeleton';
 import { F1Chart } from '@/components/F1Chart';
@@ -307,5 +308,14 @@ export function IterationCard({ sessionId, iteration, isBest, isExpanded }: Iter
     </div>
   );
 
-  return { summaryContent, detailContent };
+  return (
+    <>
+      <AccordionTrigger className="hover:no-underline px-2">
+        {summaryContent}
+      </AccordionTrigger>
+      <AccordionContent className="px-2">
+        {detailContent}
+      </AccordionContent>
+    </>
+  );
 }
