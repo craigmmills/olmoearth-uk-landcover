@@ -9,3 +9,7 @@ __pycache__/
 *.tiff
 experiments/
 .DS_Store
+
+# Frontend
+webui/frontend/node_modules/
+webui/frontend/dist/
