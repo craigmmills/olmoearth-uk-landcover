@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { buildTileUrl, buildChangeMapTileUrl, checkHealth, listSessions } from './client';
+import { buildTileUrl, buildChangeMapTileUrl, buildWorldCoverTileUrl, checkHealth, listSessions } from './client';
 
 describe('buildTileUrl', () => {
   it('constructs correct URL for 2021 tiles', () => {
@@ -20,6 +20,13 @@ describe('buildChangeMapTileUrl', () => {
     const url = buildChangeMapTileUrl('experiments/session_1/iteration_001/change_map_cog.tif');
     expect(url).toContain('/cog/tiles/{z}/{x}/{y}.png?url=file://');
     expect(url).toContain('change_map_cog.tif');
+  });
+});
+
+describe('buildWorldCoverTileUrl', () => {
+  it('constructs correct WorldCover tile URL', () => {
+    const url = buildWorldCoverTileUrl();
+    expect(url).toBe('http://localhost:8000/api/worldcover/tiles/{z}/{x}/{y}.png');
   });
 });
 

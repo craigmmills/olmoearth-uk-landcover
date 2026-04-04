@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { LANDCOVER_CLASSES, LANDCOVER_COLORS, AOI_CENTER, DEFAULT_LAYERS } from './constants';
+import { LANDCOVER_CLASSES, LANDCOVER_COLORS, AOI_CENTER, DEFAULT_LAYERS, COMPARISON_MODES } from './constants';
 
 describe('LANDCOVER_CLASSES', () => {
   it('has 6 entries (classes 0-5)', () => {
@@ -43,5 +43,18 @@ describe('DEFAULT_LAYERS', () => {
     const visible = DEFAULT_LAYERS.filter((l) => l.visible);
     expect(visible).toHaveLength(1);
     expect(visible[0].id).toBe('landcover-2021');
+  });
+});
+
+describe('COMPARISON_MODES', () => {
+  it('has 3 comparison modes', () => {
+    expect(COMPARISON_MODES).toHaveLength(3);
+  });
+
+  it('each mode has a value and label', () => {
+    for (const mode of COMPARISON_MODES) {
+      expect(mode.value).toBeTruthy();
+      expect(mode.label).toBeTruthy();
+    }
   });
 });

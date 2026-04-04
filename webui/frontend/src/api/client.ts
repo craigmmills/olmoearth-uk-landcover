@@ -96,3 +96,11 @@ export function deriveChangeMapCogPath(
   const iterDir = `iteration_${String(iterationNum).padStart(3, '0')}`;
   return `experiments/${sessionId}/${iterDir}/change_map_cog.tif`;
 }
+
+/**
+ * Build the tile URL template for WorldCover overlay tiles.
+ * Returns a URL with {z}/{x}/{y} placeholders for MapLibre.
+ */
+export function buildWorldCoverTileUrl(): string {
+  return `${API_BASE_URL}/api/worldcover/tiles/{z}/{x}/{y}.png`;
+}

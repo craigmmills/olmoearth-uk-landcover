@@ -487,6 +487,56 @@ def get_landcover_tile(
     return Response(content=image, media_type="image/png")
 
 
+@app.get("/api/worldcover/tiles/{z}/{x}/{y}.png")
+def get_worldcover_tile(z: int, x: int, y: int) -> Response:
+    """Serve WorldCover tiles with remapped classes and landcover colormap.
+
+    Loads the WorldCover GeoTIFF, applies WORLDCOVER_REMAP to convert ESA
+    WorldCover classes to our simplified 6-class scheme, then renders with
+    the same LANDCOVER_CMAP colormap used for classification tiles.
+    """
+    import numpy as np
+    from rio_tiler.io import Reader
+    from rio_tiler.errors import TileOutsideBounds
+    from webui.backend.cog import ensure_cog
+    from src.config import WORLDCOVER_DIR, WORLDCOVER_REMAP
+
+    worldcover_tif = WORLDCOVER_DIR / "worldcover_2021.tif"
+    if not worldcover_tif.exists():
+        raise HTTPException(status_code=404, detail="WorldCover data not found")
+
+    cog_path = ensure_cog(worldcover_tif)
+
+    try:
+        with Reader(str(cog_path)) as reader:
+            tile = reader.tile(x, y, z, indexes=(1,))
+    except TileOutsideBounds:
+        raise HTTPException(status_code=404, detail="Tile outside raster bounds")
+
+    # Remap WorldCover classes to our simplified scheme
+    # Handle nodata: pixels not in WORLDCOVER_REMAP are left as 0,
+    # but we track them to set alpha=0 (transparent) later
+    remapped = np.zeros_like(tile.data)
+    mapped_mask = np.zeros(tile.data.shape, dtype=bool)
+    for src_class, dst_class in WORLDCOVER_REMAP.items():
+        mask = tile.data == src_class
+        remapped[mask] = dst_class
+        mapped_mask |= mask
+
+    # Replace tile data with remapped values
+    tile.data = remapped
+
+    # Set nodata mask for unmapped pixels (value 0 in source, or unknown classes)
+    # This prevents false Built-up pixels from nodata areas (fixes VF-15)
+    if tile.mask is not None:
+        tile.mask = tile.mask & (mapped_mask.squeeze() * 255).astype(np.uint8)
+
+    # Apply the same landcover colormap
+    image = tile.render(colormap=LANDCOVER_CMAP)
+
+    return Response(content=image, media_type="image/png")
+
+
 # ---------------------------------------------------------------------------
 # SSE Endpoint
 # ---------------------------------------------------------------------------

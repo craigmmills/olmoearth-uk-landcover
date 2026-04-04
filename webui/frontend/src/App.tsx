@@ -1,14 +1,18 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import MapView from '@/components/MapView';
+import ComparisonView from '@/components/ComparisonView';
 import ControlPanel from '@/components/ControlPanel';
 import { ExperimentDashboard } from '@/components/ExperimentDashboard';
 import { useLatestSession } from '@/hooks/useLatestSession';
 import { useBackendHealth } from '@/hooks/useBackendHealth';
 import { useSessionSSE } from '@/hooks/useSessionSSE';
-import { getSession } from '@/api/client';
+import { getSession, buildWorldCoverTileUrl } from '@/api/client';
+import { AOI_CENTER, DEFAULT_ZOOM } from '@/constants';
+import type { ViewState, ViewStateChangeEvent } from '@vis.gl/react-maplibre';
 import type {
   LayerState,
   BasemapType,
+  ComparisonMode,
   LoopStatus,
   SSENewIterationEvent,
   SSESessionCompleteEvent,
@@ -139,11 +143,125 @@ export default function App() {
     }));
   }, []);
 
+  // --- Comparison mode state ---
+  const [comparisonEnabled, setComparisonEnabled] = useState(false);
+  const [comparisonMode, setComparisonMode] = useState<ComparisonMode>('satellite-vs-classification');
+
+  // Lifted viewState for persistence across mode toggles (fixes VF-9)
+  const [viewState, setViewState] = useState<ViewState>({
+    longitude: AOI_CENTER.longitude,
+    latitude: AOI_CENTER.latitude,
+    zoom: DEFAULT_ZOOM,
+    bearing: 0,
+    pitch: 0,
+    padding: { top: 0, bottom: 0, left: 0, right: 0 },
+  });
+
+  const handleToggleComparison = useCallback(() => {
+    setComparisonEnabled((prev) => !prev);
+  }, []);
+
+  const handleComparisonModeChange = useCallback((mode: ComparisonMode) => {
+    setComparisonMode(mode);
+  }, []);
+
+  const handleViewStateChange = useCallback((evt: ViewStateChangeEvent) => {
+    setViewState(evt.viewState);
+  }, []);
+
+  // Derive comparison sides based on selected mode
+  const comparisonSides = useMemo(() => {
+    // For satellite-vs-classification, prefer whichever classification is currently visible
+    const classification2021 = layers.find((l) => l.id === 'landcover-2021');
+    const classification2023 = layers.find((l) => l.id === 'landcover-2023');
+    // Use visible classification, defaulting to 2021
+    const activeClassification = classification2021?.visible
+      ? classification2021
+      : classification2023?.visible
+        ? classification2023
+        : classification2021;
+
+    switch (comparisonMode) {
+      case 'satellite-vs-classification': {
+        return {
+          left: {
+            basemap: 'satellite' as const,
+            layers: [] as LayerState[],
+            label: 'Satellite',
+          },
+          right: {
+            basemap: 'satellite' as const,
+            layers: activeClassification
+              ? [{ ...activeClassification, visible: true, opacity: 1.0 }]
+              : [],
+            label: activeClassification?.label ?? 'Classification',
+          },
+        };
+      }
+      case '2021-vs-2023': {
+        return {
+          left: {
+            basemap: 'satellite' as const,
+            layers: classification2021
+              ? [{ ...classification2021, visible: true, opacity: 1.0 }]
+              : [],
+            label: 'Classification 2021',
+          },
+          right: {
+            basemap: 'satellite' as const,
+            layers: classification2023
+              ? [{ ...classification2023, visible: true, opacity: 1.0 }]
+              : [],
+            label: 'Classification 2023',
+          },
+        };
+      }
+      case 'classification-vs-worldcover': {
+        const worldcoverLayer: LayerState = {
+          id: 'worldcover',
+          label: 'WorldCover',
+          visible: true,
+          opacity: 1.0,
+          tileUrlTemplate: buildWorldCoverTileUrl(),
+        };
+        return {
+          left: {
+            basemap: 'satellite' as const,
+            layers: classification2021
+              ? [{ ...classification2021, visible: true, opacity: 1.0 }]
+              : [],
+            label: 'Classification 2021',
+          },
+          right: {
+            basemap: 'satellite' as const,
+            layers: [worldcoverLayer],
+            label: 'WorldCover 2021',
+          },
+        };
+      }
+    }
+  }, [comparisonMode, layers]);
+
   return (
     <div className="flex h-screen w-screen overflow-hidden">
       {/* Map -- 70% width */}
       <div className="flex-[7] relative">
-        <MapView basemap={basemap} layers={layers} />
+        {comparisonEnabled ? (
+          <ComparisonView
+            leftSide={comparisonSides.left}
+            rightSide={comparisonSides.right}
+            viewState={viewState}
+            onMove={handleViewStateChange}
+            loading={loading}
+          />
+        ) : (
+          <MapView
+            basemap={basemap}
+            layers={layers}
+            viewState={viewState}
+            onMove={handleViewStateChange}
+          />
+        )}
       </div>
 
       {/* Side Panel -- 30% width */}
@@ -158,6 +276,10 @@ export default function App() {
           loading={loading}
           error={error}
           loopStatus={loopStatus}
+          comparisonEnabled={comparisonEnabled}
+          onToggleComparison={handleToggleComparison}
+          comparisonMode={comparisonMode}
+          onComparisonModeChange={handleComparisonModeChange}
         />
 
         {/* Experiment Dashboard */}

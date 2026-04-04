@@ -46,6 +46,11 @@ export interface LayerState {
 
 export type BasemapType = 'osm' | 'satellite';
 
+export type ComparisonMode =
+  | 'satellite-vs-classification'
+  | '2021-vs-2023'
+  | 'classification-vs-worldcover';
+
 // --- Dashboard types (Issue #23) ---
 
 /** Typed per-class metrics from metrics.json */

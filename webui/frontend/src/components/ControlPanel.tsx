@@ -2,7 +2,8 @@ import BasemapToggle from '@/components/BasemapToggle';
 import LayerControls from '@/components/LayerControls';
 import ConnectionStatus from '@/components/ConnectionStatus';
 import LoopStatus from '@/components/LoopStatus';
-import type { LayerState, BasemapType, LoopStatus as LoopStatusType } from '@/types';
+import ComparisonControls from '@/components/ComparisonControls';
+import type { LayerState, BasemapType, ComparisonMode, LoopStatus as LoopStatusType } from '@/types';
 
 interface ControlPanelProps {
   basemap: BasemapType;
@@ -14,6 +15,10 @@ interface ControlPanelProps {
   loading: boolean;
   error: string | null;
   loopStatus: LoopStatusType;
+  comparisonEnabled: boolean;
+  onToggleComparison: () => void;
+  comparisonMode: ComparisonMode;
+  onComparisonModeChange: (mode: ComparisonMode) => void;
 }
 
 export default function ControlPanel({
@@ -26,6 +31,10 @@ export default function ControlPanel({
   loading,
   error,
   loopStatus,
+  comparisonEnabled,
+  onToggleComparison,
+  comparisonMode,
+  onComparisonModeChange,
 }: ControlPanelProps) {
   return (
     <div className="flex flex-col gap-4">
@@ -44,6 +53,13 @@ export default function ControlPanel({
       )}
 
       <BasemapToggle basemap={basemap} onChange={onBasemapChange} />
+
+      <ComparisonControls
+        enabled={comparisonEnabled}
+        onToggle={onToggleComparison}
+        mode={comparisonMode}
+        onModeChange={onComparisonModeChange}
+      />
 
       <LayerControls
         layers={layers}

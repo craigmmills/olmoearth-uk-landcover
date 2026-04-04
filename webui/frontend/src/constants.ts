@@ -1,3 +1,5 @@
+import type { ComparisonMode } from '@/types';
+
 /**
  * AOI center from src/config.py -- hardcoded per PROMPT.md constraint.
  * TODO: Fetch dynamically if backend adds /api/aoi endpoint in future.
@@ -46,4 +48,14 @@ export const DEFAULT_LAYERS = [
   { id: 'landcover-2021', label: 'Landcover 2021', year: '2021' as const, visible: true, opacity: 0.7 },
   { id: 'landcover-2023', label: 'Landcover 2023', year: '2023' as const, visible: false, opacity: 0.7 },
   { id: 'change-map', label: 'Change Map', year: 'change' as const, visible: false, opacity: 0.8 },
+] as const;
+
+/** Available comparison modes with display labels */
+export const COMPARISON_MODES: ReadonlyArray<{
+  value: ComparisonMode;
+  label: string;
+}> = [
+  { value: 'satellite-vs-classification', label: 'Satellite vs Classification' },
+  { value: '2021-vs-2023', label: '2021 vs 2023' },
+  { value: 'classification-vs-worldcover', label: 'Classification vs WorldCover' },
 ] as const;
