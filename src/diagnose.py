@@ -128,13 +128,21 @@ TIER_PARAMS: dict[int, set[str]] = {
 }
 
 
-def _load_evaluation_results() -> list[dict] | None:
+def _load_evaluation_results(iteration: int | None = None) -> list[dict] | None:
     """Load VLM evaluation results from disk.
 
     Returns None if no evaluation files exist or directory is missing.
     Handles corrupt/unreadable files gracefully (logs warning, skips them).
     """
-    eval_dir = config.EVALUATION_DIR
+    # When iteration is provided, look in the experiment iteration directory
+    # where evaluations are actually saved by autocorrect.py.
+    # Falls back to config.EVALUATION_DIR for backward compatibility
+    # (this fallback path is not exercised through run_diagnosis()).
+    if iteration is not None:
+        eval_dir = config.EXPERIMENTS_DIR / f"iteration_{iteration:03d}"
+    else:
+        eval_dir = config.EVALUATION_DIR
+
     if not eval_dir.exists():
         print("[diagnose] No evaluation directory found, using metrics only")
         return None
@@ -290,10 +298,88 @@ def _build_diagnosis_prompt(
     # System prompt: role, constraints, output format
     # NOTE: Keep parameter constraints in sync with src/experiment.py validate_config()
     system_prompt = (
-        "You are a remote sensing landcover classification diagnostician. "
+        # Section 1: Expert persona
+        "You are an expert remote sensing scientist and landcover classification "
+        "diagnostician. You have deep expertise in satellite remote sensing, spectral "
+        "analysis, landscape ecology, and machine learning for Earth observation. "
         "You analyze evaluation results from a satellite landcover classification "
         "pipeline and propose exactly ONE hypothesis for what parameter change to "
         "make next.\n\n"
+
+        # Section 2: OlmoEarth context
+        "## Foundation Model Context\n"
+        "You are analyzing outputs from OlmoEarth Tiny, a 14M-param ViT foundation "
+        "model from AI2 pretrained on 285K global satellite samples. It produces "
+        "192-dim per-pixel embeddings from Sentinel-2 L2A imagery. The embeddings "
+        "encode spectral, spatial, and temporal patterns learned during self-supervised "
+        "pretraining.\n\n"
+
+        # Section 3: Sentinel-2 band physics
+        "## Sentinel-2 Band Physics\n"
+        "The input uses 12 Sentinel-2 bands: "
+        "B02 (Blue 490nm), B03 (Green 560nm), B04 (Red 665nm), B08 (NIR 842nm) at "
+        "10m native; B05-B07 (Red Edge 705-783nm), B8A (NIR 865nm), B11 (SWIR 1610nm), "
+        "B12 (SWIR 2190nm) at 20m; B01 (Coastal 443nm), B09 (Water Vapour 945nm) at "
+        "60m.\n\n"
+
+        # Section 4: Class confusion explanations
+        "## Common Class Confusions and Physical Causes\n"
+        "- Built-up vs Bare soil: Spectrally similar in visible/SWIR. NDBI "
+        "(Normalized Difference Built-up Index) using SWIR helps. Spatial context "
+        "(regular patterns = urban, irregular = bare soil) is the key discriminator.\n"
+        "- Built-up vs Tree cover: Garden trees in suburban areas create mixed 10m "
+        "pixels. Spatial context features help — isolated green patches in built-up "
+        "matrix indicate gardens, not forest.\n"
+        "- Cropland vs Grassland: Nearly identical spectrally when crops are growing. "
+        "Temporal phenology (crop harvest creates bare soil signal in late summer) is "
+        "the only reliable separator with single-date imagery.\n"
+        "- Water vs Shadow: Shadows can appear dark blue and be confused with water. "
+        "Water has distinctly low NIR reflectance.\n\n"
+
+        # Section 5: Physical meaning of parameters
+        "## What Each Parameter Physically Does\n"
+        "- NDVI (features.add_ndvi): Measures vegetation vigor. High NDVI = dense "
+        "green vegetation. Separates vegetated from non-vegetated.\n"
+        "- NDWI (features.add_ndwi): Measures water content. High NDWI = water or "
+        "very wet surfaces. Separates water from land.\n"
+        "- Spatial context (features.add_spatial_context): Captures landscape texture "
+        "\u2014 forests are spatially homogeneous, urban areas are heterogeneous. A 3x3 "
+        "mean smooths noise; std captures texture.\n"
+        "- PCA (training.pca_components): OlmoEarth's 192 dims are redundant for 6 "
+        "classes. PCA to 50-100 components removes noise dimensions and can improve "
+        "RF/SVM performance.\n"
+        "- Mode filter (post_processing.mode_filter_size): Post-classification spatial "
+        "smoothing. Removes salt-and-pepper misclassification noise but can smooth "
+        "real small features.\n"
+        "- Boundary exclusion (training.exclude_boundary_pixels): WorldCover labels "
+        "are unreliable at class boundaries (mixed pixels). Training only on interior "
+        "pixels gives cleaner decision boundaries.\n\n"
+
+        # Section 6: Classifier selection guidance
+        "## Classifier Selection Guidance\n"
+        "- RandomForest: Strong baseline for high-dim features, handles class "
+        "imbalance well, no preprocessing needed.\n"
+        "- GradientBoosting: Often outperforms RF with max_depth=3-5 and "
+        "learning_rate=0.1. Better at learning subtle class boundaries.\n"
+        "- SVM: Excellent for high-dim spaces when classes are linearly separable "
+        "in embedding space. Needs StandardScaler. Try RBF kernel first.\n"
+        "- MLP: Can learn non-linear class boundaries that trees miss. Good with "
+        "PCA-reduced features. Needs scaling.\n\n"
+
+        # Section 7: AOI context
+        "## Area of Interest\n"
+        "The AOI is a 5km x 5km area near Exeter, Devon, UK. Landscape: suburban "
+        "Exeter, surrounding farmland (pasture and arable), deciduous/mixed woodland, "
+        "River Exe, some parkland. Summer imagery (June-August).\n\n"
+
+        # Section 8: Strategic thinking
+        "## Strategic Thinking\n"
+        "Consider the confusion matrix holistically. If two classes are heavily "
+        "confused, focus on adding features that discriminate them (spectral indices, "
+        "spatial context) before tuning classifier hyperparameters. Think about the "
+        "physical/spectral reasons for confusion, then match the intervention.\n\n"
+
+        # Section 9: Rules (PRESERVED VERBATIM)
         "RULES:\n"
         "1. Propose exactly ONE change per iteration\n"
         "2. All parameter changes must be in a SINGLE component "
@@ -392,7 +478,53 @@ def _build_diagnosis_prompt(
 
     # Section 3: VLM evaluation (optional, loosely coupled)
     if evaluation:
-        sections.append(f"## VLM Evaluation Results\n{json.dumps(evaluation, indent=2)}")
+        vlm_parts = []
+        for eval_entry in evaluation:
+            eval_data = eval_entry.get("evaluation", eval_entry)
+            year = eval_entry.get("year", "unknown")
+            vlm_parts.append(f"### Year: {year}")
+
+            # Overall score
+            overall = eval_data.get("overall_score")
+            if overall is not None:
+                vlm_parts.append(f"Overall score: {overall}/10")
+
+            # Spatial quality
+            spatial_q = eval_data.get("spatial_quality")
+            if spatial_q:
+                vlm_parts.append(f"Spatial quality: {spatial_q}")
+
+            # Per-class scores
+            per_class_eval = eval_data.get("per_class", [])
+            if per_class_eval:
+                vlm_parts.append("Per-class VLM scores:")
+                for cls in per_class_eval:
+                    name = cls.get("class_name", "?")
+                    score = cls.get("score", "?")
+                    notes = cls.get("notes", "")
+                    vlm_parts.append(f"  {name}: {score}/10 — {notes}")
+
+            # Error regions
+            error_regions = eval_data.get("error_regions", [])
+            if error_regions:
+                vlm_parts.append("Error regions identified by VLM:")
+                for er in error_regions:
+                    loc = er.get("location", "?")
+                    exp = er.get("expected", "?")
+                    pred = er.get("predicted", "?")
+                    sev = er.get("severity", "?")
+                    vlm_parts.append(
+                        f"  - {loc}: expected {exp}, predicted {pred} (severity: {sev})"
+                    )
+
+            # Recommendations
+            recs = eval_data.get("recommendations", [])
+            if recs:
+                vlm_parts.append("VLM recommendations:")
+                for rec in recs:
+                    vlm_parts.append(f"  - {rec}")
+
+        sections.append("## VLM Evaluation Results\n" + "\n".join(vlm_parts))
 
     # Section 4: Experiment history
     sections.append(f"## {history_summary}")
@@ -1041,7 +1173,7 @@ def run_diagnosis(iteration: int | None = None) -> Hypothesis:
               f"(status={status}), it will be overwritten")
 
     # Step 2: Load evaluation results (optional)
-    evaluation = _load_evaluation_results()
+    evaluation = _load_evaluation_results(iteration=iteration)
 
     # Step 3: Summarize history
     history_summary = _summarize_experiment_history()

@@ -193,6 +193,39 @@ class TestLoadEvaluationResults:
         captured = capsys.readouterr()
         assert "WARNING" in captured.out
 
+    def test_iteration_loads_from_experiment_dir(self, tmp_path, monkeypatch, sample_evaluation):
+        """iteration=N loads evaluations from experiments/iteration_00N/."""
+        from src import config as cfg_mod
+        exp_dir = tmp_path / "experiments"
+        monkeypatch.setattr(cfg_mod, "EXPERIMENTS_DIR", exp_dir)
+        iter_dir = exp_dir / "iteration_015"
+        iter_dir.mkdir(parents=True)
+        with open(iter_dir / "evaluation_2021.json", "w") as f:
+            json.dump(sample_evaluation, f)
+        result = _load_evaluation_results(iteration=15)
+        assert result is not None
+        assert len(result) == 1
+        assert result[0]["year"] == "2021"
+
+    def test_iteration_none_falls_back_to_eval_dir(self, tmp_path, monkeypatch, sample_evaluation):
+        """iteration=None uses config.EVALUATION_DIR (backward compat)."""
+        from src import config as cfg_mod
+        eval_dir = tmp_path / "evaluations"
+        eval_dir.mkdir()
+        with open(eval_dir / "evaluation_2021.json", "w") as f:
+            json.dump(sample_evaluation, f)
+        monkeypatch.setattr(cfg_mod, "EVALUATION_DIR", eval_dir)
+        result = _load_evaluation_results(iteration=None)
+        assert result is not None
+        assert len(result) == 1
+
+    def test_iteration_missing_dir_returns_none(self, tmp_path, monkeypatch):
+        """iteration=N with no experiment dir returns None."""
+        from src import config as cfg_mod
+        monkeypatch.setattr(cfg_mod, "EXPERIMENTS_DIR", tmp_path / "experiments")
+        result = _load_evaluation_results(iteration=99)
+        assert result is None
+
 
 # ---------------------------------------------------------------------------
 # Class 3: TestSummarizeExperimentHistory
@@ -398,6 +431,55 @@ class TestBuildDiagnosisPrompt:
         assert "Built-up" in user
         assert "Cropland" in user
         assert "Predicted ->" in user
+
+    def test_expert_prompt_has_domain_sections(self, default_config, sample_metrics):
+        """System prompt contains all expert domain knowledge sections."""
+        system, _ = _build_diagnosis_prompt(
+            sample_metrics, None, "No history", default_config, 1,
+        )
+        # Expert persona
+        assert "expert remote sensing scientist" in system
+        # OlmoEarth context
+        assert "OlmoEarth Tiny" in system
+        assert "192-dim" in system
+        # Sentinel-2 band physics
+        assert "B02 (Blue 490nm)" in system
+        assert "B08 (NIR 842nm)" in system
+        # Class confusions
+        assert "Built-up vs Bare soil" in system
+        assert "Cropland vs Grassland" in system
+        assert "Water vs Shadow" in system
+        # Parameter meanings
+        assert "Measures vegetation vigor" in system
+        assert "Measures water content" in system
+        # Classifier guidance
+        assert "RandomForest:" in system
+        assert "GradientBoosting:" in system
+        # AOI context
+        assert "Exeter, Devon, UK" in system
+        # Strategic thinking
+        assert "confusion matrix holistically" in system
+
+    def test_vlm_evaluation_structured_format(self, default_config, sample_metrics,
+                                               sample_evaluation):
+        """VLM evaluation is formatted with structured fields, not raw JSON."""
+        _, user = _build_diagnosis_prompt(
+            sample_metrics, [sample_evaluation], "No history", default_config, 1,
+        )
+        assert "VLM Evaluation Results" in user
+        # Structured fields present
+        assert "Overall score: 7/10" in user
+        assert "Spatial quality:" in user
+        assert "salt-and-pepper" in user
+        # Error regions
+        assert "Error regions identified by VLM" in user
+        assert "NW quadrant" in user
+        assert "expected Cropland" in user
+        # Recommendations
+        assert "VLM recommendations" in user
+        assert "Enable post-processing" in user
+        # Per-class VLM scores
+        assert "Built-up: 8.0/10" in user
 
 
 # ---------------------------------------------------------------------------
